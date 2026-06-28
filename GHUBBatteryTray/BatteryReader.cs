@@ -38,9 +38,9 @@ namespace GHUBBatteryTray
 
                 // 必要に応じてWHERE句は変更してください
                 command.CommandText = @"
-SELECT file
-FROM data
-LIMIT 1;";
+                    SELECT file
+                    FROM data
+                    LIMIT 1;";
 
                 object? result = command.ExecuteScalar();
 
