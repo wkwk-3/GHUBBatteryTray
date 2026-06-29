@@ -13,5 +13,7 @@ namespace GHUBBatteryTray
         public int Battery { get; set; }
 
         public string Message { get; set; } = string.Empty;
+
+        public ToolTipIcon BalloonTipIcon { get; set; } = ToolTipIcon.None;
     }
 }

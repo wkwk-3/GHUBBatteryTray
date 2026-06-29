@@ -100,6 +100,7 @@ namespace GHUBBatteryTray
                 dgvNotification.Rows.Add(
                     rule.Enabled,
                     rule.Battery,
+                    rule.BalloonTipIcon.ToString(),
                     rule.Message,
                     "×");
             }
@@ -120,6 +121,7 @@ namespace GHUBBatteryTray
             dgvNotification.Rows.Add(
                 true,
                 20,
+                ToolTipIcon.None.ToString(),
                 "",
                 "×");
 
@@ -174,6 +176,7 @@ namespace GHUBBatteryTray
                 {
                     Enabled = Convert.ToBoolean(row.Cells["Enabled"].Value ?? true),
                     Battery = Convert.ToInt32(row.Cells["Battery"].Value),
+                    BalloonTipIcon = ParseBalloonTipIcon(row.Cells["BalloonTipIcon"].Value),
                     Message = row.Cells["Message"].Value?.ToString() ?? ""
                 };
 
@@ -188,6 +191,15 @@ namespace GHUBBatteryTray
             {
                 _settings.DeviceNotifications[_currentDevice] = rules;
             }
+        }
+
+        private static ToolTipIcon ParseBalloonTipIcon(object? value)
+        {
+            string? iconName = value?.ToString();
+
+            return Enum.TryParse(iconName, true, out ToolTipIcon icon)
+                ? icon
+                : ToolTipIcon.None;
         }
 
         private void BtnClose_Click(object? sender, EventArgs e)

@@ -84,10 +84,18 @@
                 FillWeight = 20
             });
 
+            dgvNotification.Columns.Add(new System.Windows.Forms.DataGridViewComboBoxColumn()
+            {
+                Name = "BalloonTipIcon",
+                HeaderText = "通知アイコン",
+                DataSource = Enum.GetNames(typeof(System.Windows.Forms.ToolTipIcon)),
+                FillWeight = 35
+            });
+
             dgvNotification.Columns.Add(new System.Windows.Forms.DataGridViewTextBoxColumn()
             {
                 Name = "Message",
-                HeaderText = "通知文言",
+                HeaderText = "通知内容",
                 FillWeight = 100
             });
 

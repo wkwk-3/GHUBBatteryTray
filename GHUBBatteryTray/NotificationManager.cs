@@ -54,16 +54,15 @@ namespace GHUBBatteryTray
         /// </summary>
         private void ShowNotification(string deviceName, NotificationRule rule)
         {
-            _notifyIcon.BalloonTipTitle = "GHUB Battery";
 
             _notifyIcon.BalloonTipText = rule.Message
                 .Replace(notificationReplaceToDeviceName, deviceName)
                 .Replace(notificationReplaceToBatteryPer, rule.Battery.ToString())
                 .Replace(notificationReplaceToRn, "\r\n");
 
-            AppLogger.Info($"通知を表示しました。Device={deviceName}, BatteryThreshold={rule.Battery}");
+            AppLogger.Info($"通知を表示しました。Device={deviceName}, BatteryThreshold={rule.Battery}, BalloonTipIcon={rule.BalloonTipIcon}");
 
-            _notifyIcon.BalloonTipIcon = ToolTipIcon.Warning;
+            _notifyIcon.BalloonTipIcon = rule.BalloonTipIcon;
 
             _notifyIcon.ShowBalloonTip(5000);
         }
