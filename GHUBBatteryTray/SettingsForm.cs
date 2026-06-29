@@ -1,12 +1,12 @@
 namespace GHUBBatteryTray
 {
-    public partial class Form1 : Form
+    public partial class SettingsForm : Form
     {
         private AppSettings _settings = new();
         private string _currentDevice = string.Empty;
         private bool _loading;
 
-        public Form1()
+        public SettingsForm()
         {
             InitializeComponent();
 

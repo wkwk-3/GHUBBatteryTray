@@ -10,7 +10,7 @@ namespace GHUBBatteryTray
 
         private readonly NotificationManager _notificationManager;
 
-        private Form1? _form;
+        private SettingsForm? _form;
 
         public TrayApplicationContext()
         {
@@ -166,7 +166,7 @@ namespace GHUBBatteryTray
         {
             if (_form == null || _form.IsDisposed)
             {
-                _form = new Form1();
+                _form = new SettingsForm();
 
                 _form.FormClosed += (_, _) =>
                 {

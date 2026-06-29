@@ -1,6 +1,6 @@
 ﻿namespace GHUBBatteryTray
 {
-    partial class Form1
+    partial class SettingsForm
     {
         private System.ComponentModel.IContainer components = null;
 
