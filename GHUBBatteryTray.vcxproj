@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Rust (cargo) を Visual Studio からビルドするための Makefile プロジェクト。
+  ビルド / リビルド / クリーンで cargo を呼び、exe を bin\<構成>\GHUBBatteryTray.exe にコピーする。
+  必要なもの: Rust (rustup) と Visual Studio の「C++ によるデスクトップ開発」
+-->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{4BD3026F-7F3A-4FA0-964D-46BA3149D8B2}</ProjectGuid>
+    <Keyword>MakeFileProj</Keyword>
+    <RootNamespace>GHUBBatteryTray</RootNamespace>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Makefile</ConfigurationType>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)bin\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)obj\$(Configuration)\</IntDir>
+
+    <!-- cargo の設定: Debug は dev プロファイル、Release は release プロファイル -->
+    <CargoProfileArg Condition="'$(Configuration)'=='Release'">--release</CargoProfileArg>
+    <CargoProfileDir Condition="'$(Configuration)'=='Release'">release</CargoProfileDir>
+    <CargoProfileDir Condition="'$(Configuration)'=='Debug'">debug</CargoProfileDir>
+    <CargoManifest>$(MSBuildProjectDirectory)\Cargo.toml</CargoManifest>
+    <CargoTargetDir>$(MSBuildProjectDirectory)\target</CargoTargetDir>
+    <!--
+      フォルダーのパスが長いと、cargo の中間ファイルが Windows の 260 文字制限を超えてリンクに失敗する (LNK1104)。
+      その場合は %LOCALAPPDATA%\GHUBBatteryTray-build\<パスごとの番号> に中間ファイルを置く。
+    -->
+    <CargoTargetDir Condition="$(MSBuildProjectDirectory.Length) &gt; 60">$(LOCALAPPDATA)\GHUBBatteryTray-build\$([MSBuild]::StableStringHash($(MSBuildProjectDirectory)))</CargoTargetDir>
+
+    <!-- PATH に cargo が無いとき (VS から起動した場合など) は rustup の既定の場所を足す -->
+    <CargoEnv>(where cargo &gt;nul 2&gt;nul || set "PATH=%USERPROFILE%\.cargo\bin;%PATH%")</CargoEnv>
+    <CargoBuild>cargo build $(CargoProfileArg) --manifest-path "$(CargoManifest)" --target-dir "$(CargoTargetDir)"</CargoBuild>
+    <CargoCopy>(if not exist "$(OutDir)" mkdir "$(OutDir)") &amp;&amp; copy /Y "$(CargoTargetDir)\$(CargoProfileDir)\ghub_battery_tray.exe" "$(OutDir)GHUBBatteryTray.exe" &gt;nul</CargoCopy>
+    <CargoClean>cargo clean --manifest-path "$(CargoManifest)" --target-dir "$(CargoTargetDir)" &amp; if exist "$(OutDir)GHUBBatteryTray.exe" del /Q "$(OutDir)GHUBBatteryTray.exe"</CargoClean>
+
+    <NMakeBuildCommandLine>$(CargoEnv) &amp; $(CargoBuild) &amp;&amp; $(CargoCopy)</NMakeBuildCommandLine>
+    <NMakeReBuildCommandLine>$(CargoEnv) &amp; $(CargoClean) &amp; $(CargoBuild) &amp;&amp; $(CargoCopy)</NMakeReBuildCommandLine>
+    <NMakeCleanCommandLine>$(CargoEnv) &amp; $(CargoClean)</NMakeCleanCommandLine>
+    <NMakeOutput>$(OutDir)GHUBBatteryTray.exe</NMakeOutput>
+
+    <!-- F5 で常駐アプリとして起動 (設定画面を開くならコマンド引数に - -settings) -->
+    <LocalDebuggerCommand>$(OutDir)GHUBBatteryTray.exe</LocalDebuggerCommand>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="Cargo.toml" />
+    <None Include="Cargo.lock" />
+    <None Include="build.rs" />
+    <None Include="README.md" />
+    <None Include="src\ghub.rs" />
+    <None Include="src\hidpp.rs" />
+    <None Include="src\history.rs" />
+    <None Include="src\icon.rs" />
+    <None Include="src\main.rs" />
+    <None Include="src\settings.rs" />
+    <None Include="src\sources.rs" />
+    <None Include="src\tray.rs" />
+    <None Include="src\ui.rs" />
+    <None Include="src\webhook.rs" />
+    <Image Include="assets\app.ico" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
