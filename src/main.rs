@@ -2,24 +2,29 @@
 
 mod ghub;
 mod hidpp;
+mod health;
 mod history;
 mod icon;
+mod log;
 mod settings;
 mod sources;
+mod startup;
 mod tray;
 mod webhook;
 mod ui;
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::core::w;
+use windows::core::HSTRING;
 
 fn main() {
     let settings_mode = std::env::args().any(|a| a == "--settings");
-    let name = if settings_mode { w!(r"Local\GHUBBatteryTray.Settings") } else { w!(r"Local\GHUBBatteryTray.Tray") };
 
-    // 二重起動しない
-    let _mutex = unsafe { CreateMutexW(None, true, name) };
+    // 二重起動しない (設定フォルダーごと。テスト用に別フォルダーで動かすときはぶつからない)
+    let dir = settings::dir().to_string_lossy().to_lowercase();
+    let hash = dir.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    let name = HSTRING::from(format!(r"Local\GHUBBatteryTray.{}.{hash:016x}", if settings_mode { "Settings" } else { "Tray" }));
+    let _mutex = unsafe { CreateMutexW(None, true, &name) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         return;
     }
@@ -211,5 +216,114 @@ mod tests {
         assert!((tr.drain_per_hour.unwrap() - 5.0).abs() < 0.01);
         let charging = crate::history::trend(&[], 10_000, &battery(60, true, Some(12.0)));
         assert_eq!(charging.drain_per_hour, None);
+    }
+
+    #[test]
+    fn status_labels_power_as_discharge() {
+        let mut b = battery(55, false, Some(10.0));
+        b.power_mw = Some(14.74);
+        assert!(b.status().contains("放電量 14.7 mW"), "{}", b.status());
+    }
+
+    #[test]
+    fn last_run_extracts_discharge_before_charging() {
+        use crate::history::Sample;
+        let h = 3600;
+        let s = |t, percent, charging| Sample { t, percent, charging };
+        let samples = vec![s(0, 100, true), s(h, 95, false), s(6 * h, 55, false), s(6 * h + 60, 55, true)];
+        let run = crate::health::last_run(&samples, Some(15.0)).unwrap();
+        assert_eq!((run.start_pct, run.end_pct), (95, 55));
+        assert!((run.hours - 5.0).abs() < 1e-9);
+        // 40% を 5 時間 -> 満充電で 12.5 時間、15mW なら 187.5mWh
+        assert!((run.full_runtime_h() - 12.5).abs() < 1e-9);
+        assert!((run.capacity_mwh().unwrap() - 187.5).abs() < 1e-6);
+        // 減りが小さすぎる区間は記録しない
+        assert!(crate::health::last_run(&[s(0, 80, false), s(2 * h, 75, false)], None).is_none());
+    }
+
+    #[test]
+    fn recorder_logs_run_when_charging_starts() {
+        let dir = std::env::temp_dir().join(format!("ghbt_health_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("history.csv");
+        let _ = std::fs::write(&path, "");
+        let _ = std::fs::write(crate::health::path_beside(&path), "");
+        let mut rec = crate::history::Recorder::default();
+        let mut b = battery(90, false, None);
+        b.power_mw = Some(14.0);
+        rec.record_to(&path, &[b.clone()], 0);
+        b.percentage = 60;
+        rec.record_to(&path, &[b.clone()], 4 * 3600);
+        b.charging = true;
+        rec.record_to(&path, &[b.clone()], 4 * 3600 + 60);
+        let runs = crate::health::load_all(&crate::health::path_beside(&path));
+        let r = &runs["mouse"][0];
+        assert_eq!((r.start_pct, r.end_pct, r.power_mw), (90, 60, Some(14.0)));
+    }
+
+    #[test]
+    fn health_trend_predicts_80_and_70_percent() {
+        use crate::health::{Run, analyze, Basis};
+        let day = 86400u64;
+        // 30 日で持ち時間が 20h -> 17h (毎回 30% 消費) に落ちていく
+        let runs: Vec<Run> = (0..8)
+            .map(|i| {
+                let runtime = 20.0 - 3.0 * i as f64 / 7.0;
+                Run { end: i * 4 * day + day, start_pct: 90, end_pct: 60, hours: runtime * 0.3, power_mw: None }
+            })
+            .collect();
+        let h = analyze(&runs, 30 * day);
+        assert!(h.health.unwrap() < 0.95);
+        let (t80, basis) = h.degrade_at.unwrap();
+        assert_eq!(basis, Basis::Trend);
+        assert!(t80 > 30 * day && h.replace_at.unwrap().0 > t80);
+        assert!((h.cycles - 2.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn health_falls_back_to_cycle_pace() {
+        use crate::health::{Run, analyze, Basis};
+        let day = 86400u64;
+        let runs = vec![Run { end: day, start_pct: 100, end_pct: 50, hours: 10.0, power_mw: Some(15.0) }];
+        let h = analyze(&runs, 10 * day);
+        let (t80, basis) = h.degrade_at.unwrap();
+        assert_eq!(basis, Basis::Cycles);
+        assert!(t80 > 10 * day);
+        assert_eq!(h.health, None);
+        assert_eq!(crate::health::year_month(1_792_627_200), (2026, 10));
+    }
+
+    #[test]
+    fn no_runs_shows_zero_cycles_not_negative() {
+        let h = crate::health::analyze(&[], 1000);
+        assert_eq!(format!("{:.1}", h.cycles), "0.0");
+    }
+
+    #[test]
+    fn level_colors_default_matches_old_thresholds() {
+        let c = crate::settings::LevelColors::default();
+        assert_eq!(c.for_percent(85), [32, 150, 80]);
+        assert_eq!(c.for_percent(51), [32, 150, 80]);
+        assert_eq!(c.for_percent(50), [225, 130, 0]);
+        assert_eq!(c.for_percent(21), [225, 130, 0]);
+        assert_eq!(c.for_percent(20), [214, 48, 49]);
+        assert_eq!(c.for_percent(0), [214, 48, 49]);
+        let charging = ghub::Battery { charging: true, ..battery(10, true, None) };
+        assert_eq!(crate::icon::level_color(Some(&charging), &c), (30, 120, 220));
+        assert_eq!(crate::icon::level_color(None, &c), (110, 116, 128));
+    }
+
+    #[test]
+    fn level_colors_custom_and_normalize() {
+        use crate::settings::{LevelColor, LevelColors};
+        let mut c = LevelColors { levels: vec![LevelColor { max_percent: 90, color: [1, 1, 1] }, LevelColor { max_percent: 10, color: [2, 2, 2] }], ..Default::default() };
+        c.normalize();
+        // 小さい順に並び、最後は 100%
+        assert_eq!(c.levels.iter().map(|l| l.max_percent).collect::<Vec<_>>(), vec![10, 100]);
+        assert_eq!(c.for_percent(5), [2, 2, 2]);
+        assert_eq!(c.for_percent(95), [1, 1, 1]);
+        // 古い設定ファイル (色の項目なし) は既定の色
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.level_colors, LevelColors::default());
     }
 }

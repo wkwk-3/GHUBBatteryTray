@@ -1,31 +1,31 @@
 //! トレイアイコンの描画。色付きの角丸タイルに白い数字を、実サイズ (DPI 相当) で直接描く。
-//! 色: 緑 >50% / 橙 21〜50% / 赤 20%以下 / 青 充電中 / 灰 未接続
+//! 色は設定の「残量の色」(既定: 緑 >50% / 橙 21〜50% / 赤 20%以下 / 青 充電中 / 灰 未接続)
 
 use crate::ghub::Battery;
+use crate::settings::LevelColors;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 
-pub fn level_color(b: Option<&Battery>) -> (u8, u8, u8) {
-    match b {
-        None => (110, 116, 128),
-        Some(b) if !b.connected => (110, 116, 128),
-        Some(b) if b.charging => (30, 120, 220),
-        Some(b) if b.percentage <= 20 => (214, 48, 49),
-        Some(b) if b.percentage <= 50 => (225, 130, 0),
-        _ => (32, 150, 80),
-    }
+/// 残量の色 (設定の「残量の色」に従う)
+pub fn level_color(b: Option<&Battery>, colors: &LevelColors) -> (u8, u8, u8) {
+    let [r, g, bl] = match b {
+        Some(b) if b.connected && b.charging => colors.charging,
+        Some(b) if b.connected => colors.for_percent(b.percentage),
+        _ => colors.disconnected,
+    };
+    (r, g, bl)
 }
 
 const FONT_FACES: [&str; 2] = ["Bahnschrift SemiBold SemiConden", "Segoe UI Semibold"];
 
-pub fn create(b: Option<&Battery>, size: i32) -> HICON {
+pub fn create(b: Option<&Battery>, size: i32, colors: &LevelColors) -> HICON {
     let text = match b {
         Some(b) if b.connected => b.percentage.clamp(0, 100).to_string(),
         _ => "--".to_string(),
     };
-    let (r, g, bl) = level_color(b);
+    let (r, g, bl) = level_color(b, colors);
 
     unsafe {
         let screen = GetDC(None);

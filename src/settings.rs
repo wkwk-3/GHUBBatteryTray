@@ -39,6 +39,61 @@ pub struct Settings {
     pub webhook_url: String,
     pub webhook_format: WebhookFormat,
     pub theme: Theme,
+    /// 残量ごとの色
+    pub level_colors: LevelColors,
+}
+
+/// 残量 max_percent % 以下ならこの色
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct LevelColor {
+    pub max_percent: i32,
+    pub color: [u8; 3],
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct LevelColors {
+    /// 小さい順。最後の段階は 100% まで
+    pub levels: Vec<LevelColor>,
+    pub charging: [u8; 3],
+    pub disconnected: [u8; 3],
+}
+
+impl Default for LevelColors {
+    fn default() -> Self {
+        LevelColors {
+            levels: vec![
+                LevelColor { max_percent: 20, color: [214, 48, 49] },
+                LevelColor { max_percent: 50, color: [225, 130, 0] },
+                LevelColor { max_percent: 100, color: [32, 150, 80] },
+            ],
+            charging: [30, 120, 220],
+            disconnected: [110, 116, 128],
+        }
+    }
+}
+
+impl LevelColors {
+    /// 残量に対応する色
+    pub fn for_percent(&self, percent: i32) -> [u8; 3] {
+        let mut levels: Vec<&LevelColor> = self.levels.iter().collect();
+        levels.sort_by_key(|l| l.max_percent);
+        levels.iter().find(|l| percent <= l.max_percent).or(levels.last()).map(|l| l.color).unwrap_or([32, 150, 80])
+    }
+
+    /// 段階を小さい順に並べ、最後を 100% にそろえる
+    pub fn normalize(&mut self) {
+        self.levels.sort_by_key(|l| l.max_percent);
+        self.levels.dedup_by_key(|l| l.max_percent);
+        if self.levels.is_empty() {
+            *self = LevelColors::default();
+            return;
+        }
+        if let Some(last) = self.levels.last_mut() {
+            last.max_percent = 100;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +173,7 @@ impl Default for Settings {
             webhook_url: String::new(),
             webhook_format: WebhookFormat::Discord,
             theme: Theme::System,
+            level_colors: LevelColors::default(),
         }
     }
 }
@@ -155,6 +211,7 @@ impl Settings {
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
+        self.level_colors.normalize();
         self.tray_display_device = self.tray_display_devices.first().cloned().unwrap_or_default();
         self.selected_device = self.tray_display_device.clone();
         self.notifications.clear();
@@ -176,14 +233,5 @@ impl Settings {
 
     pub fn rules(&self, device: &str) -> Option<&Vec<Rule>> {
         self.device_notifications.iter().find(|(k, _)| k.eq_ignore_ascii_case(device)).map(|(_, v)| v)
-    }
-}
-
-pub fn log(message: &str) {
-    use std::io::Write;
-    let _ = std::fs::create_dir_all(dir());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir().join("GHUBBatteryTray.log")) {
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let _ = writeln!(f, "unix={secs} {message}");
     }
 }

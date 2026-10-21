@@ -27,6 +27,8 @@ pub struct Battery {
     pub asleep: bool,
     /// 放電量 (消費電力 mW)。G HUB の推定値
     pub power_mw: Option<f64>,
+    /// G HUB が推定した満充電での持ち時間 (時間)
+    pub max_life_hours: Option<f64>,
 }
 
 impl Battery {
@@ -49,7 +51,7 @@ impl Battery {
         }
         if !self.charging && !self.asleep {
             if let Some(mw) = self.power_mw {
-                s += &format!("  ·  {mw:.1} mW");
+                s += &format!("  ·  放電量 {mw:.1} mW");
             }
         }
         s
@@ -172,6 +174,7 @@ fn apply_state(b: &mut Battery, state: &Value) {
     b.charging = state["charging"] == true;
     b.fully_charged = state["fullyCharged"] == true;
     b.remaining_hours = state["mileage"].as_f64().filter(|h| *h > 0.0);
+    b.max_life_hours = state["maxLifeSpan"].as_f64().filter(|h| *h > 0.0);
     b.power_mw = (state["consumption"]["useMw"] == true).then(|| state["consumption"]["value"].as_f64()).flatten().filter(|v| *v > 0.0);
 }
 

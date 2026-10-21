@@ -1,7 +1,7 @@
 //! 通知を Webhook (Discord / Slack / 汎用 JSON) に送る。
 //! HTTP は Windows 標準の curl.exe に任せ、常駐プロセスに TLS ライブラリを持たない。
 
-use crate::settings::{self, Settings, WebhookFormat};
+use crate::settings::{Settings, WebhookFormat};
 use serde_json::json;
 use std::io::Write;
 use std::os::windows::process::CommandExt;
@@ -35,8 +35,10 @@ pub fn send_if_enabled(settings: &Settings, m: Message) {
     let url = settings.webhook_url.trim().to_string();
     let format = settings.webhook_format;
     std::thread::spawn(move || {
-        if let Err(e) = send(&url, format, &m) {
-            settings::log(&format!("[ERROR] Webhook 送信失敗: {e}"));
+        // URL にはトークンが含まれるのでログに書かない
+        match send(&url, format, &m) {
+            Ok(code) => crate::log::info(format!("Webhook を送信しました ({}, HTTP {code})", m.event)),
+            Err(e) => crate::log::error(format!("Webhook の送信に失敗しました ({}): {e}", m.event)),
         }
     });
 }

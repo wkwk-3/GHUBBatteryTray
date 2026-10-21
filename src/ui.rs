@@ -2,7 +2,10 @@
 
 use crate::ghub::{Battery, Source};
 use crate::icon::level_color;
+use crate::settings::{LevelColor, LevelColors};
+use crate::{log, startup};
 use crate::settings::{Rule, Settings, Theme, WebhookFormat};
+use crate::health::{self, Basis, Run};
 use crate::history::{self, Sample};
 use crate::{hidpp, sources, webhook};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, RichText, Stroke, Vec2};
@@ -75,19 +78,27 @@ pub fn run() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("GHUB Battery 設定")
-            .with_inner_size([840.0, 640.0])
+            .with_inner_size([860.0, 780.0])
             .with_min_inner_size([660.0, 480.0]),
         ..Default::default()
     };
     if let Err(e) = eframe::run_native("GHUB Battery 設定", options, Box::new(|cc| Ok(Box::new(SettingsApp::new(cc))))) {
-        crate::settings::log(&format!("[ERROR] 設定画面を開けませんでした: {e}"));
+        crate::log::error(format!("設定画面を開けませんでした: {e}"));
     }
+}
+
+struct Loaded {
+    devices: Vec<Battery>,
+    history: HashMap<String, Vec<Sample>>,
+    runs: HashMap<String, Vec<Run>>,
 }
 
 #[derive(PartialEq)]
 enum Tab {
     Devices,
     Webhook,
+    /// 歯車ボタンで開くアプリの設定
+    App,
 }
 
 struct SettingsApp {
@@ -95,7 +106,11 @@ struct SettingsApp {
     devices: Vec<Battery>,
     /// デバイス名 (小文字) -> 残量の履歴
     history: HashMap<String, Vec<Sample>>,
-    loading: Option<Receiver<(Vec<Battery>, HashMap<String, Vec<Sample>>)>>,
+    /// デバイス名 (小文字) -> 放電区間の記録 (健康状態の推定用)
+    runs: HashMap<String, Vec<Run>>,
+    loading: Option<Receiver<Loaded>>,
+    /// 選択中のデバイスの詳細 (アコーディオン) を開いているか
+    expanded: bool,
     selected: String,
     status: String,
     dirty: bool,
@@ -105,6 +120,8 @@ struct SettingsApp {
     webhook_result: Option<Result<u16, String>>,
     dark: bool,
     dark_checked: Instant,
+    /// Windows 起動時に開始 (レジストリの状態)
+    startup: bool,
 }
 
 impl SettingsApp {
@@ -117,18 +134,29 @@ impl SettingsApp {
             settings,
             devices: Vec::new(),
             history: HashMap::new(),
+            runs: HashMap::new(),
+            // `--expand` で詳細を開いた状態で起動
+            expanded: std::env::args().any(|a| a == "--expand"),
             loading: None,
             status: String::new(),
             dirty: false,
             // `--tab webhook` で Webhook タブから開く
-            tab: if std::env::args().any(|a| a == "webhook") { Tab::Webhook } else { Tab::Devices },
+            tab: if std::env::args().any(|a| a == "webhook") {
+                Tab::Webhook
+            } else if std::env::args().any(|a| a == "app") {
+                Tab::App
+            } else {
+                Tab::Devices
+            },
             show_url: false,
             webhook_test: None,
             webhook_result: None,
             dark,
             dark_checked: Instant::now(),
+            startup: startup::enabled(),
         };
         app.refresh(&cc.egui_ctx);
+        log::info("設定画面を開きました");
         app
     }
 
@@ -137,7 +165,9 @@ impl SettingsApp {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let devices = sources::collect(&mut hidpp::Reader::new());
-            let _ = tx.send((devices, history::load_all(&history::path())));
+            let history = history::load_all(&history::path());
+            let runs = health::load_all(&health::path_beside(&history::path()));
+            let _ = tx.send(Loaded { devices, history, runs });
             ctx.request_repaint();
         });
         self.loading = Some(rx);
@@ -161,9 +191,13 @@ impl SettingsApp {
             Ok(()) => {
                 self.dirty = false;
                 self.status = "保存しました".into();
+                log::info("設定を保存しました");
                 notify_tray();
             }
-            Err(e) => self.status = format!("保存に失敗しました: {e}"),
+            Err(e) => {
+                log::error(format!("設定の保存に失敗しました: {e}"));
+                self.status = format!("保存に失敗しました: {e}");
+            }
         }
     }
 
@@ -176,13 +210,15 @@ impl SettingsApp {
         notify_tray();
         self.dark = theme.is_dark();
         setup_style(ctx, self.dark);
+        log::info(format!("テーマ: {}", theme.label()));
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.loading {
-            if let Ok((devices, history)) = rx.try_recv() {
+            if let Ok(Loaded { devices, history, runs }) = rx.try_recv() {
                 self.devices = devices;
                 self.history = history;
+                self.runs = runs;
                 self.loading = None;
                 let mut kinds: Vec<&str> = self.devices.iter().filter_map(|b| b.source.map(Source::label)).collect();
                 kinds.dedup();
@@ -195,6 +231,10 @@ impl SettingsApp {
         }
         if let Some(rx) = &self.webhook_test {
             if let Ok(r) = rx.try_recv() {
+                match &r {
+                    Ok(code) => log::info(format!("Webhook のテスト送信に成功しました (HTTP {code})")),
+                    Err(e) => log::error(format!("Webhook のテスト送信に失敗しました: {e}")),
+                }
                 self.webhook_result = Some(r);
                 self.webhook_test = None;
             }
@@ -246,6 +286,9 @@ impl eframe::App for SettingsApp {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if gear_button(ui, p, self.tab == Tab::App).on_hover_text("設定").clicked() {
+                            self.tab = if self.tab == Tab::App { Tab::Devices } else { Tab::App };
+                        }
                         let next = self.settings.theme.next();
                         let text = format!("テーマ: {}", self.settings.theme.label());
                         if ui.add(egui::Button::new(text)).on_hover_text(format!("クリックで「{}」に切り替え", next.label())).clicked() {
@@ -258,12 +301,12 @@ impl eframe::App for SettingsApp {
             // フッター (下端に固定)
             egui::Panel::bottom("footer").frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { top: 10, ..Default::default() })).show(ui, |ui| {
                 if self.tab == Tab::Devices {
-                    ui.label(RichText::new("通知内容で使える置換:  {name} デバイス名   {battery} しきい値   {rn} 改行").color(p.sub).size(12.5));
+                    ui.label(RichText::new("使用可能置換:  {name} デバイス名   {battery} しきい値   {rn} 改行").color(p.sub).size(12.5));
                     ui.add_space(8.0);
                 }
                 ui.horizontal(|ui| {
                     if self.tab == Tab::Devices {
-                        if ui.add_enabled(!self.selected.is_empty(), egui::Button::new("＋ ルール追加").min_size(Vec2::new(110.0, 34.0))).clicked() {
+                        if ui.add_enabled(!self.selected.is_empty(), egui::Button::new("＋ 通知追加").min_size(Vec2::new(110.0, 34.0))).clicked() {
                             self.settings.device_notifications.entry(self.selected.clone()).or_default().push(Rule::default());
                             self.dirty = true;
                         }
@@ -290,6 +333,7 @@ impl eframe::App for SettingsApp {
             egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| match self.tab {
                 Tab::Devices => self.devices_tab(ui, p),
                 Tab::Webhook => self.webhook_tab(ui, p),
+                Tab::App => self.app_tab(ui, p),
             });
         });
     }
@@ -297,13 +341,19 @@ impl eframe::App for SettingsApp {
 
 impl SettingsApp {
     fn devices_tab(&mut self, ui: &mut egui::Ui, p: Palette) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.devices_tab_body(ui, p));
+    }
+
+    fn devices_tab_body(&mut self, ui: &mut egui::Ui, p: Palette) {
         let names = self.device_names();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(12.0, 12.0);
             for (name, battery) in &names {
                 let is_tray = self.settings.is_tray(name);
-                let samples = self.history.get(&name.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or(&[]);
-                if device_card(ui, p, name, battery.as_ref(), samples, name.eq_ignore_ascii_case(&self.selected), is_tray).clicked() {
+                let selected = name.eq_ignore_ascii_case(&self.selected);
+                if device_card(ui, p, &self.settings.level_colors, name, battery.as_ref(), selected, selected && self.expanded, is_tray).clicked() {
+                    // 同じカードなら開閉、別のカードなら選んで開く
+                    self.expanded = !(selected && self.expanded);
                     self.selected = name.clone();
                 }
             }
@@ -312,6 +362,19 @@ impl SettingsApp {
             }
         });
 
+        // 詳細 (アコーディオン)
+        let key = self.selected.to_ascii_lowercase();
+        let battery = names.iter().find(|(n, _)| n.eq_ignore_ascii_case(&self.selected)).and_then(|(_, b)| b.clone());
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id("device_detail"), false);
+        state.set_open(self.expanded && !self.selected.is_empty());
+        state.show_body_unindented(ui, |ui| {
+            ui.add_space(12.0);
+            let samples = self.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            let runs = self.runs.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            detail_panel(ui, p, battery.as_ref(), samples, runs);
+        });
+        state.store(ui.ctx());
+
         ui.add_space(14.0);
         if self.selected.is_empty() {
             return;
@@ -319,13 +382,13 @@ impl SettingsApp {
 
         let selected_label = names.iter().find(|(n, _)| n == &self.selected).map(label).unwrap_or(&self.selected).to_string();
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("通知ルール  —  {selected_label}")).size(18.0).strong().color(p.text));
+            ui.label(RichText::new(format!("通知設定  —  {selected_label}")).size(18.0).strong().color(p.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.checkbox(&mut self.settings.notify_full_charge, "充電完了を通知").changed() {
+                if ui.checkbox(&mut self.settings.notify_full_charge, "充電完了通知").changed() {
                     self.dirty = true;
                 }
                 let mut tray = self.settings.is_tray(&self.selected);
-                if ui.checkbox(&mut tray, "このデバイスをトレイに表示").on_hover_text("デバイスごとに別のアイコンで表示します").changed() {
+                if ui.checkbox(&mut tray, "アイコン表示").on_hover_text("タスクトレイにこのデバイスのアイコンを表示します (デバイスごとに別のアイコン)").changed() {
                     let selected = self.selected.clone();
                     self.settings.set_tray(&selected, tray);
                     self.dirty = true;
@@ -335,7 +398,7 @@ impl SettingsApp {
         ui.add_space(6.0);
 
         egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(12).show(ui, |ui| {
-            ui.set_min_size(Vec2::new(ui.available_width(), ui.available_height().max(120.0)));
+            ui.set_min_size(Vec2::new(ui.available_width(), ui.available_height().max(170.0)));
             if rules_table(ui, p, self.settings.device_notifications.entry(self.selected.clone()).or_default()) {
                 self.dirty = true;
             }
@@ -349,8 +412,10 @@ impl SettingsApp {
         egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(20).show(ui, |ui| {
             ui.set_min_width(ui.available_width());
 
-            ui.label(RichText::new("Webhook 通知").size(18.0).strong().color(p.text));
-            ui.label(RichText::new("残量低下・充電完了の通知を Discord / Slack などにも送ります。").color(p.sub));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Webhook 通知").size(18.0).strong().color(p.text));
+                info_icon(ui, p, "残量低下・充電完了の通知を Discord / Slack などにも送ります。");
+            });
             ui.add_space(12.0);
 
             if ui.checkbox(&mut self.settings.webhook_enabled, RichText::new("Webhook に送信する").size(15.0)).changed() {
@@ -430,6 +495,190 @@ impl SettingsApp {
     }
 }
 
+impl SettingsApp {
+    /// 歯車ボタンで開く設定: アイコン表示 / 起動 / 残量の色
+    fn app_tab(&mut self, ui: &mut egui::Ui, p: Palette) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            section(ui, p, "アイコン表示", "タスクトレイにアイコンを表示するデバイスです。デバイスごとに別のアイコンが表示されます。\n「保存」で反映されます。", |ui| {
+                let names = self.device_names();
+                if names.is_empty() {
+                    ui.label(RichText::new("デバイスが見つかりません").color(p.sub));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(24.0, 8.0);
+                    for (name, battery) in &names {
+                        let mut show = self.settings.is_tray(name);
+                        let text = battery.as_ref().map(|b| b.label().to_string()).unwrap_or_else(|| name.clone());
+                        if ui.checkbox(&mut show, text).changed() {
+                            self.settings.set_tray(name, show);
+                            self.dirty = true;
+                        }
+                    }
+                });
+            });
+
+            section(ui, p, "起動", "オンにすると、Windows にサインインしたときに自動で起動します。\n切り替えるとすぐに反映されます (「保存」は不要)。", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Windows 起動時に開始").color(p.text));
+                    ui.add_space(8.0);
+                    if toggle_switch(ui, &mut self.startup).changed() {
+                        startup::set(self.startup);
+                        self.startup = startup::enabled();
+                    }
+                    ui.label(RichText::new(if self.startup { "オン" } else { "オフ" }).color(p.sub));
+                });
+            });
+
+            section(
+                ui,
+                p,
+                "残量の色",
+                "残量に応じた、タスクトレイのアイコンと画面の色です。上から順に「この % 以下ならこの色」で、最後の段階は 100% までです。\n色の四角を押すと色を選べます。画面にはすぐ反映され、タスクトレイには「保存」で反映されます。",
+                |ui| {
+                    let colors = &mut self.settings.level_colors;
+
+                    // プレビュー
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("プレビュー").color(p.sub).size(12.5));
+                        ui.add_space(8.0);
+                        let mut samples: Vec<(String, [u8; 3])> = [5, 15, 30, 45, 60, 85].iter().map(|v| (v.to_string(), colors.for_percent(*v))).collect();
+                        samples.push(("充".into(), colors.charging));
+                        samples.push(("--".into(), colors.disconnected));
+                        for (text, c) in samples {
+                            color_tile(ui, &text, c);
+                        }
+                    });
+                    ui.add_space(10.0);
+
+                    let mut remove = None;
+                    let count = colors.levels.len();
+                    for i in 0..count {
+                        let low = if i == 0 { 0 } else { colors.levels[i - 1].max_percent + 1 };
+                        let high_limit = if i + 1 < count { colors.levels[i + 1].max_percent - 1 } else { 100 };
+                        ui.horizontal(|ui| {
+                            ui.add_sized([44.0, CONTROL_H], egui::Label::new(RichText::new(format!("{low}%")).color(p.sub)));
+                            ui.label(RichText::new("〜").color(p.sub));
+                            if i + 1 < count {
+                                let drag = egui::DragValue::new(&mut colors.levels[i].max_percent).range(low..=high_limit.max(low)).suffix(" %").speed(0.3);
+                                if ui.add_sized([80.0, CONTROL_H], drag).changed() {
+                                    self.dirty = true;
+                                }
+                            } else {
+                                colors.levels[i].max_percent = 100;
+                                ui.add_sized([80.0, CONTROL_H], egui::Label::new(RichText::new("100 %").color(p.text)));
+                            }
+                            if egui::color_picker::color_edit_button_srgb(ui, &mut colors.levels[i].color).changed() {
+                                self.dirty = true;
+                            }
+                            if count > 1 && ui.add(egui::Button::new(RichText::new("削除").color(p.danger)).frame(false)).clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove {
+                        colors.levels.remove(i);
+                        colors.normalize();
+                        self.dirty = true;
+                    }
+                    ui.add_space(4.0);
+                    if ui.add_enabled(count < 8, egui::Button::new("＋ 段階を追加")).clicked() {
+                        // いちばん広い段階を半分に分ける
+                        let mut best = (0usize, 0i32);
+                        for (i, l) in colors.levels.iter().enumerate() {
+                            let low = if i == 0 { 0 } else { colors.levels[i - 1].max_percent + 1 };
+                            if l.max_percent - low > best.1 {
+                                best = (i, l.max_percent - low);
+                            }
+                        }
+                        if best.1 >= 2 {
+                            let (i, width) = best;
+                            let low = if i == 0 { 0 } else { colors.levels[i - 1].max_percent + 1 };
+                            let color = colors.levels[i].color;
+                            colors.levels.insert(i, LevelColor { max_percent: low + width / 2, color });
+                            self.dirty = true;
+                        }
+                    }
+
+                    ui.add_space(10.0);
+                    for (label, color) in [("充電中", &mut colors.charging), ("未接続", &mut colors.disconnected)] {
+                        ui.horizontal(|ui| {
+                            ui.add_sized([44.0 + 8.0 + 14.0 + 80.0, CONTROL_H], egui::Label::new(RichText::new(label).color(p.text)));
+                            if egui::color_picker::color_edit_button_srgb(ui, color).changed() {
+                                self.dirty = true;
+                            }
+                        });
+                    }
+
+                    ui.add_space(10.0);
+                    if ui.add_enabled(*colors != LevelColors::default(), egui::Button::new("デフォルトに戻す")).clicked() {
+                        *colors = LevelColors::default();
+                        self.dirty = true;
+                    }
+                },
+            );
+        });
+    }
+}
+
+/// カード状の区切り (見出し + i アイコン)
+fn section(ui: &mut egui::Ui, p: Palette, title: &str, info: &str, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(18).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(title).size(16.0).strong().color(p.text));
+            info_icon(ui, p, info);
+        });
+        ui.add_space(10.0);
+        body(ui);
+    });
+    ui.add_space(12.0);
+}
+
+/// 色見本の小さなタイル (トレイアイコンと同じ見た目)
+fn color_tile(ui: &mut egui::Ui, text: &str, c: [u8; 3]) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(7), Color32::from_rgb(c[0], c[1], c[2]));
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), Color32::WHITE);
+}
+
+/// オン/オフのスイッチ
+fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let size = Vec2::new(42.0, 22.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let t = ui.ctx().animate_bool_responsive(response.id, *on);
+    let visuals = ui.style().interact_selectable(&response, *on);
+    let off_bg = ui.visuals().widgets.inactive.bg_fill;
+    let bg = if *on { ACCENT } else { off_bg };
+    ui.painter().rect(rect, CornerRadius::same(11), bg, visuals.bg_stroke, egui::StrokeKind::Inside);
+    let x = egui::lerp((rect.left() + 11.0)..=(rect.right() - 11.0), t);
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, Color32::WHITE);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// 歯車のボタン (押すと設定ページ)
+fn gear_button(ui: &mut egui::Ui, p: Palette, active: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(CONTROL_H), egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    let bg = if active { ACCENT } else { visuals.bg_fill };
+    ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
+    let color = if active { Color32::WHITE } else { p.text };
+    let c = rect.center();
+    let painter = ui.painter();
+    // 歯 8 本 + 外周 + 中央の穴
+    for i in 0..8 {
+        let a = i as f32 * std::f32::consts::TAU / 8.0;
+        let dir = Vec2::new(a.cos(), a.sin());
+        painter.line_segment([c + dir * 5.5, c + dir * 9.0], Stroke::new(3.0, color));
+    }
+    painter.circle_filled(c, 6.5, color);
+    painter.circle_filled(c, 2.6, bg);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn format_label(f: WebhookFormat) -> &'static str {
     match f {
         WebhookFormat::Discord => "Discord",
@@ -438,7 +687,7 @@ fn format_label(f: WebhookFormat) -> &'static str {
     }
 }
 
-/// 通知ルール表。変更があれば true
+/// 通知設定の表。変更があれば true
 fn rules_table(ui: &mut egui::Ui, p: Palette, rules: &mut Vec<Rule>) -> bool {
     // 列幅: 有効 / 残量 / アイコン / 通知内容 (残り) / 削除
     const W: [f32; 3] = [44.0, 110.0, 100.0];
@@ -464,10 +713,10 @@ fn rules_table(ui: &mut egui::Ui, p: Palette, rules: &mut Vec<Rule>) -> bool {
     });
     ui.separator();
 
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("rules").auto_shrink([false, true]).max_height(220.0).show(ui, |ui| {
         if rules.is_empty() {
             ui.add_space(8.0);
-            ui.label(RichText::new("ルールがありません。「＋ ルール追加」で追加できます。").color(p.sub));
+            ui.label(RichText::new("通知がありません。「＋ 通知追加」で追加できます。").color(p.sub));
         }
 
         for (i, rule) in rules.iter_mut().enumerate() {
@@ -500,10 +749,11 @@ fn rules_table(ui: &mut egui::Ui, p: Palette, rules: &mut Vec<Rule>) -> bool {
     changed
 }
 
-fn device_card(ui: &mut egui::Ui, p: Palette, name: &str, battery: Option<&Battery>, samples: &[Sample], selected: bool, is_tray: bool) -> egui::Response {
-    let (r, g, b) = level_color(battery);
+#[allow(clippy::too_many_arguments)]
+fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, battery: Option<&Battery>, selected: bool, expanded: bool, is_tray: bool) -> egui::Response {
+    let (r, g, b) = level_color(battery, colors);
     let accent = Color32::from_rgb(r, g, b);
-    let size = Vec2::new(340.0, 182.0);
+    let size = Vec2::new(390.0, 104.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let painter = ui.painter_at(rect);
 
@@ -531,7 +781,7 @@ fn device_card(ui: &mut egui::Ui, p: Palette, name: &str, battery: Option<&Batte
 
     let mut notes = Vec::new();
     if is_tray {
-        notes.push("トレイ表示中".to_string());
+        notes.push("アイコン表示中".to_string());
     }
     match battery {
         Some(b) if b.connected => {
@@ -545,18 +795,125 @@ fn device_card(ui: &mut egui::Ui, p: Palette, name: &str, battery: Option<&Batte
     painter.text(egui::pos2(big.max.x + 10.0, big.center().y), egui::Align2::LEFT_CENTER, notes.join("  ·  "), egui::FontId::proportional(12.5), p.sub);
 
     // 残量バー
-    let bar = egui::Rect::from_min_size(egui::pos2(rect.min.x + pad, rect.min.y + 80.0), Vec2::new(rect.width() - pad * 2.0, 6.0));
+    let bar = egui::Rect::from_min_size(egui::pos2(rect.min.x + pad, rect.max.y - pad - 6.0), Vec2::new(rect.width() - pad * 2.0 - 70.0, 6.0));
     painter.rect_filled(bar, CornerRadius::same(3), p.track);
     if let Some(b) = battery.filter(|b| b.connected && b.percentage > 0) {
         let fill = egui::Rect::from_min_size(bar.min, Vec2::new((bar.width() * b.percentage.clamp(0, 100) as f32 / 100.0).max(6.0), 6.0));
         painter.rect_filled(fill, CornerRadius::same(3), accent);
     }
 
-    // バーの下: 減り具合 (実線) と このまま減った場合の予測 (点線)
-    let chart = egui::Rect::from_min_max(egui::pos2(bar.min.x, bar.max.y + 10.0), egui::pos2(bar.max.x, rect.max.y - pad - 18.0));
-    draw_trend(&painter, chart, p, battery, samples);
+    // 詳細の開閉
+    let hint = if expanded { "閉じる ▲" } else { "詳細 ▼" };
+    let hint_color = if selected || response.hovered() { ACCENT } else { p.sub };
+    painter.text(egui::pos2(rect.max.x - pad, bar.center().y), egui::Align2::RIGHT_CENTER, hint, egui::FontId::proportional(12.0), hint_color);
 
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// 小さな「i」アイコン。ホバーで説明を出す
+fn info_icon(ui: &mut egui::Ui, p: Palette, text: &str) {
+    let size = 15.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
+    let color = if response.hovered() { ACCENT } else { p.sub.gamma_multiply(0.8) };
+    let painter = ui.painter();
+    painter.circle_stroke(rect.center(), size / 2.0 - 1.0, Stroke::new(1.2, color));
+    painter.text(rect.center() + Vec2::new(0.0, 0.5), egui::Align2::CENTER_CENTER, "i", egui::FontId::proportional(10.5), color);
+    response.on_hover_cursor(egui::CursorIcon::Help).on_hover_ui(|ui| {
+        ui.set_max_width(300.0);
+        ui.label(RichText::new(text).size(12.5));
+    });
+}
+
+/// 見出し + i アイコン
+fn heading_with_info(ui: &mut egui::Ui, p: Palette, title: &str, info: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(15.0).strong().color(p.text));
+        info_icon(ui, p, info);
+    });
+}
+
+/// カードの下に開く詳細: 減り具合のグラフと電池の健康状態
+fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, samples: &[Sample], runs: &[Run]) {
+    let now = history::now();
+    let h = health::analyze(runs, now);
+    let remaining_runs = health::MIN_RUNS - h.runs.min(health::MIN_RUNS);
+
+    egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(16).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.columns(2, |cols| {
+            // 左: 減り具合
+            let ui = &mut cols[0];
+            heading_with_info(ui, p, "バッテリーの減り方", "実線: 実際の減り方 (最後に充電してから、最大 24 時間分)\n点線: このまま同じペースで減った場合の予測\n\n記録が少ないうちは、G HUB の残り時間から予測します。");
+            ui.add_space(6.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width() - 12.0, 150.0), egui::Sense::hover());
+            let chart = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - 18.0));
+            draw_trend(ui.painter(), chart, p, battery, samples);
+
+            // 右: 健康状態
+            let ui = &mut cols[1];
+            heading_with_info(
+                ui,
+                p,
+                "バッテリーの健康状態",
+                "推定値です。充電のたびにその前の放電 (何 % を何時間で使ったか) を記録し、記録が増えるほど正確になります。\n\nマウスは使わない間スリープして電池をほとんど使わないため、使い方によって実際の容量とはずれます。",
+            );
+            ui.add_space(6.0);
+
+            // (項目, 値, 値が出ているか, 説明)
+            let mut rows: Vec<(&str, String, bool, String)> = Vec::new();
+
+            let ghub_wh = battery.and_then(|b| Some(b.power_mw? * b.max_life_hours? / 1000.0));
+            rows.push(match (h.capacity_mwh, ghub_wh) {
+                (Some(c), g) => (
+                    "推定容量",
+                    format!("{:.2} Wh", c / 1000.0),
+                    true,
+                    format!("放電量 × 満充電での持ち時間 (実測) から計算した容量です。{}", g.map(|g| format!("\nG HUB の推定: {g:.2} Wh")).unwrap_or_default()),
+                ),
+                (None, Some(g)) => ("推定容量", format!("{g:.2} Wh"), true, "G HUB の推定値です。充電の記録がたまると、実測から計算した値に切り替わります。".into()),
+                (None, None) => ("推定容量", "—".into(), false, "放電量 (G HUB が起動しているときに取得) と充電の記録がそろうと表示します。".into()),
+            });
+            rows.push(match (h.full_runtime_h, battery.and_then(|b| b.max_life_hours)) {
+                (Some(r), _) => ("満充電での持ち", format!("約{r:.0}時間"), true, "実際の放電の記録から計算した、100% から 0% までの時間です。".into()),
+                (None, Some(g)) => ("満充電での持ち", format!("約{g:.0}時間"), true, "G HUB の推定値です。充電の記録がたまると、実測の値に切り替わります。".into()),
+                _ => ("満充電での持ち", "—".into(), false, "充電の記録がたまると表示します。".into()),
+            });
+            rows.push(match h.health {
+                Some(v) => ("容量", format!("{:.0}%", v * 100.0), true, "記録を始めた頃と比べた、今の容量です。".into()),
+                None => ("容量", "記録中".into(), false, format!("記録を始めた頃と比べた容量です。あと {remaining_runs} 回充電すると表示します。")),
+            });
+            rows.push(("充電サイクル", format!("{:.1} 回", h.cycles), true, "このアプリで記録を始めてからの充電回数です (使った % の合計 ÷ 100)。それ以前の使用分は含みません。".into()));
+
+            let when = |label: &'static str, at: Option<(u64, Basis)>, level: &str| -> (&'static str, String, bool, String) {
+                let what = format!("容量が {level} まで減る時期の目安です。");
+                match at {
+                    Some((t, _)) if t <= now => (label, "到達済みの可能性".into(), true, what),
+                    Some((t, basis)) => {
+                        let (y, m) = health::year_month(t);
+                        let why = match basis {
+                            Basis::Trend => "実際の容量の減り方から計算しています。",
+                            Basis::Cycles => "今の充電ペースと、一般的なリチウムイオン電池の寿命 (約 400 回で容量 80%、約 600 回で 70%) から計算しています。記録が 6 回・14 日以上たまると、実際の減り方からの計算に切り替わります。",
+                        };
+                        (label, format!("{y}年{m}月ごろ"), true, format!("{what}\n{why}"))
+                    }
+                    None => (label, "記録中".into(), false, format!("{what}\n1 日以上記録すると表示します。")),
+                }
+            };
+            rows.push(when("劣化の目安", h.degrade_at, "80%"));
+            rows.push(when("買い替えの目安", h.replace_at, "70%"));
+
+            egui::Grid::new("health").num_columns(2).spacing(Vec2::new(18.0, 9.0)).min_row_height(22.0).show(ui, |ui| {
+                for (label, value, known, info) in rows {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(label).color(p.sub).size(13.0));
+                        info_icon(ui, p, &info);
+                    });
+                    ui.label(RichText::new(value).color(if known { p.text } else { p.sub }).size(13.5));
+                    ui.end_row();
+                }
+            });
+        });
+    });
 }
 
 fn hours_text(h: f64) -> String {

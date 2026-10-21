@@ -34,6 +34,7 @@ pub fn collect(reader: &mut Reader) -> Vec<Battery> {
             b.display_name = a.label().to_string();
             b.remaining_hours = a.remaining_hours;
             b.power_mw = a.power_mw;
+            b.max_life_hours = a.max_life_hours;
             if aliases.get(&hid_key) != Some(&a.device_name) {
                 aliases.insert(hid_key, a.device_name.clone());
                 aliases_changed = true;

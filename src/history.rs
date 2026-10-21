@@ -34,6 +34,8 @@ pub fn now() -> u64 {
 #[derive(Default)]
 pub struct Recorder {
     last: HashMap<String, Sample>,
+    /// 放電中に最後に分かった放電量 (充電が始まった時点の記録に使う)
+    last_power: HashMap<String, f64>,
 }
 
 impl Recorder {
@@ -43,8 +45,17 @@ impl Recorder {
 
     pub fn record_to(&mut self, path: &Path, list: &[Battery], t: u64) {
         let mut lines = String::new();
+        let mut started_charging = Vec::new();
         for b in list.iter().filter(|b| b.connected && !b.asleep) {
             let s = Sample { t, percent: b.percentage, charging: b.charging };
+            if !b.charging {
+                if let Some(p) = b.power_mw {
+                    self.last_power.insert(b.device_name.clone(), p);
+                }
+            }
+            if b.charging && self.last.get(&b.device_name).is_some_and(|p| !p.charging) {
+                started_charging.push(b.device_name.clone());
+            }
             let changed = self.last.get(&b.device_name).is_none_or(|p| p.percent != s.percent || p.charging != s.charging || t >= p.t + KEEP_ALIVE_SECS);
             if changed {
                 lines += &format!("{},{},{},{}\n", t, b.device_name, s.percent, s.charging as u8);
@@ -59,6 +70,19 @@ impl Recorder {
         }
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = f.write_all(lines.as_bytes());
+        }
+        if !started_charging.is_empty() {
+            let all = load_all(path);
+            for device in started_charging {
+                let samples = all.get(&device.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or(&[]);
+                if let Some(run) = crate::health::last_run(samples, self.last_power.get(&device).copied()) {
+                    crate::health::append(&crate::health::path_beside(path), &device, &run);
+                    crate::log::info(format!(
+                        "放電の記録を追加: {device} {}% → {}% / {:.1} 時間 (満充電での持ち 約{:.0} 時間)",
+                        run.start_pct, run.end_pct, run.hours, run.full_runtime_h()
+                    ));
+                }
+            }
         }
         if std::fs::metadata(path).is_ok_and(|m| m.len() > COMPACT_BYTES) {
             compact(path, t);

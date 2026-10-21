@@ -187,6 +187,7 @@ impl Reader {
                         source: Some(Source::Hid),
                         asleep: false,
                         power_mw: None,
+                        max_life_hours: None,
                     };
                     k.last = Some((b.clone(), Instant::now()));
                     list.push(b);

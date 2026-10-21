@@ -52,7 +52,14 @@
 
     <!-- PATH に cargo が無いとき (VS から起動した場合など) は rustup の既定の場所を足す -->
     <CargoEnv>(where cargo &gt;nul 2&gt;nul || set "PATH=%USERPROFILE%\.cargo\bin;%PATH%")</CargoEnv>
-    <CargoBuild>cargo build $(CargoProfileArg) --manifest-path "$(CargoManifest)" --target-dir "$(CargoTargetDir)"</CargoBuild>
+    <!--
+      exe に埋め込まれるソースのパス (エラー表示用) からユーザー名やフォルダー名が漏れないよう、
+      ユーザーフォルダーとプロジェクトフォルダーを短い名前に置き換える。
+      パスに空白があっても壊れないよう、区切り文字 0x1F の CARGO_ENCODED_RUSTFLAGS で渡す。
+    -->
+    <RustFlagSep>$([System.Char]::ConvertFromUtf32(31))</RustFlagSep>
+    <CargoRustFlags>--remap-path-prefix=$(USERPROFILE)=~$(RustFlagSep)--remap-path-prefix=$(MSBuildProjectDirectory)=GHUBBatteryTray</CargoRustFlags>
+    <CargoBuild>set "CARGO_ENCODED_RUSTFLAGS=$(CargoRustFlags)" &amp;&amp; cargo build $(CargoProfileArg) --manifest-path "$(CargoManifest)" --target-dir "$(CargoTargetDir)"</CargoBuild>
     <CargoCopy>(if not exist "$(OutDir)" mkdir "$(OutDir)") &amp;&amp; copy /Y "$(CargoTargetDir)\$(CargoProfileDir)\ghub_battery_tray.exe" "$(OutDir)GHUBBatteryTray.exe" &gt;nul</CargoCopy>
     <CargoClean>cargo clean --manifest-path "$(CargoManifest)" --target-dir "$(CargoTargetDir)" &amp; if exist "$(OutDir)GHUBBatteryTray.exe" del /Q "$(OutDir)GHUBBatteryTray.exe"</CargoClean>
 
@@ -72,10 +79,13 @@
     <None Include="build.rs" />
     <None Include="README.md" />
     <None Include="src\ghub.rs" />
+    <None Include="src\health.rs" />
     <None Include="src\hidpp.rs" />
     <None Include="src\history.rs" />
     <None Include="src\icon.rs" />
     <None Include="src\main.rs" />
+    <None Include="src\startup.rs" />
+    <None Include="src\log.rs" />
     <None Include="src\settings.rs" />
     <None Include="src\sources.rs" />
     <None Include="src\tray.rs" />
