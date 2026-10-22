@@ -286,6 +286,8 @@ fn worker(hwnd: isize, shared: Arc<Mutex<Shared>>, refresh: Arc<AtomicBool>) {
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(0));
         }
+        // 設定画面が開いていれば、最新の残量をすぐ送る
+        crate::live::send(&prev);
 
         // 次の取得まで待つ (「残量を今すぐ再取得」ならすぐ)
         let mut waited = Duration::ZERO;

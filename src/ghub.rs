@@ -10,7 +10,8 @@ use std::time::Duration;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{Message, WebSocket};
 
-#[derive(Clone, Debug, Default)]
+/// 常駐から設定画面へ送るため serde で書き出せる
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Battery {
     /// 設定のキー (settings.db の battery/{name}/percentage と同じ名前)
     pub device_name: String,
@@ -61,7 +62,7 @@ impl Battery {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Source {
     /// G HUB なしで HID++ 直接通信
     Hid,

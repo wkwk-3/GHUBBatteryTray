@@ -133,6 +133,8 @@ struct SettingsApp {
     update_message: Option<(bool, String)>,
     /// 置換文字の補完
     completion: Option<Completion>,
+    /// 常駐から届く最新の残量
+    live: Receiver<crate::live::Live>,
 }
 
 /// 通知内容の置換文字の補完 (どの行で、どこから置き換えるか)
@@ -156,6 +158,13 @@ impl SettingsApp {
         let settings = Settings::load();
         let dark = settings.theme.is_dark();
         setup_style(&cc.egui_ctx, dark);
+        // 常駐から最新の残量を受け取る (届いたら再描画)
+        let (live_tx, live) = channel();
+        let live_ctx = cc.egui_ctx.clone();
+        crate::live::receive(move |l| {
+            let _ = live_tx.send(l);
+            live_ctx.request_repaint();
+        });
         let mut app = SettingsApp {
             selected: settings.tray_display_devices.first().cloned().unwrap_or_default(),
             settings,
@@ -181,6 +190,7 @@ impl SettingsApp {
             update_job: None,
             update_message: None,
             completion: None,
+            live,
         };
         app.refresh(&cc.egui_ctx);
         log::info("I028", "設定画面を開きました");
@@ -188,10 +198,16 @@ impl SettingsApp {
     }
 
     fn refresh(&mut self, ctx: &egui::Context) {
+        self.load(ctx, None);
+        self.status = t().loading.into();
+    }
+
+    /// 残量と記録 (履歴・統計) を読み込む。devices があれば (常駐から届いた) それを使い、デバイスには問い合わせない
+    fn load(&mut self, ctx: &egui::Context, devices: Option<Vec<Battery>>) {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let devices = sources::collect(&mut hidpp::Reader::new());
+            let devices = devices.unwrap_or_else(|| sources::collect(&mut hidpp::Reader::new()));
             let history = history::load_all(&history::path());
             let runs = health::load_all(&health::path_beside(&history::path()));
             // 統計はデバイスごとのファイル。表示する可能性のあるデバイスだけ読む
@@ -203,7 +219,28 @@ impl SettingsApp {
             ctx.request_repaint();
         });
         self.loading = Some(rx);
-        self.status = t().loading.into();
+    }
+
+    /// 常駐から届いた最新の残量を反映する (届かなければ自分で読み直す)
+    fn poll_live(&mut self, ctx: &egui::Context) {
+        let mut latest = None;
+        let mut stale = false;
+        while let Ok(l) = self.live.try_recv() {
+            match l {
+                crate::live::Live::Update(list) => latest = Some(list),
+                crate::live::Live::Stale => stale = true,
+            }
+        }
+        if self.loading.is_some() {
+            return;
+        }
+        if let Some(list) = latest {
+            // カードはすぐ更新し、グラフ用の記録は裏で読み直す
+            self.devices = list.clone();
+            self.load(ctx, Some(list));
+        } else if stale {
+            self.load(ctx, None);
+        }
     }
 
     /// カードに並べるデバイス: 取得できたもの + 通知設定だけあるもの
@@ -273,6 +310,7 @@ impl SettingsApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        self.poll_live(ctx);
         if let Some(rx) = &self.loading {
             if let Ok(Loaded { devices, history, runs, stats }) = rx.try_recv() {
                 self.devices = devices;

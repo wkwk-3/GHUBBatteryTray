@@ -8,6 +8,7 @@ mod health;
 mod history;
 mod i18n;
 mod icon;
+mod live;
 mod log;
 mod placeholders;
 mod settings;
@@ -393,10 +394,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "3.1.1");
+        assert_eq!(crate::updater::CURRENT, "3.2.0");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v3.1.2").is_newer() && r("v3.2.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v3.1.1").is_newer() && !r("v3.1.0").is_newer() && !r("v3.0.0").is_newer() && !r("nightly").is_newer());
+        assert!(r("v3.2.1").is_newer() && r("v3.3.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v3.2.0").is_newer() && !r("v3.2").is_newer() && !r("v3.1.1").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -626,7 +627,7 @@ SHA256: {}", hash.to_uppercase()),
     fn log_ids_are_unique() {
         // ログの ID (E001 など) は 1 か所でだけ使う
         let sources = [
-            include_str!("envinfo.rs"), include_str!("ghub.rs"), include_str!("health.rs"), include_str!("hidpp.rs"), include_str!("history.rs"),
+            include_str!("envinfo.rs"), include_str!("ghub.rs"), include_str!("health.rs"), include_str!("hidpp.rs"), include_str!("live.rs"), include_str!("history.rs"),
             include_str!("log.rs"), include_str!("main.rs"), include_str!("settings.rs"), include_str!("sources.rs"), include_str!("startup.rs"), include_str!("stats.rs"),
             include_str!("tray.rs"), include_str!("ui.rs"), include_str!("updater.rs"), include_str!("webhook.rs"),
         ];
