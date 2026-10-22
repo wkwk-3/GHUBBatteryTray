@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "ghub_battery_tray"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "eframe",
  "hidapi",

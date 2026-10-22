@@ -27,6 +27,9 @@ const WM_APP_UPDATE_FOUND: u32 = WM_APP + 5;
 /// 通知 (バルーン) がクリックされた
 const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 const ID_UPDATE: u32 = 6;
+/// フルスクリーンが終わったか確かめるタイマー
+const TIMER_FULLSCREEN: usize = 1;
+const FULLSCREEN_POLL_MS: u32 = 2000;
 
 const ID_NONE: u32 = 999;
 const ID_DEVICE: u32 = 1000;
@@ -61,6 +64,33 @@ struct App {
     taskbar_created: u32,
     /// 最後に出した通知が更新のお知らせか (クリックで設定を開く)
     update_balloon: bool,
+    /// フルスクリーン中のためためている通知
+    pending: Vec<Pending>,
+}
+
+/// フルスクリーン中にためておく通知
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    pub title: String,
+    pub text: String,
+    pub kind: i32,
+    pub is_update: bool,
+}
+
+/// ためていた通知を 1 つの通知にまとめる。(タイトル, 本文, アイコン)
+pub fn combine(items: &[Pending]) -> (String, String, i32) {
+    if let [one] = items {
+        return (one.title.clone(), one.text.clone(), one.kind);
+    }
+    let lines: Vec<String> = items.iter().map(|p| format!("・{}: {}", p.title, p.text.replace("\r\n", " "))).collect();
+    let mut text = lines.join("\n");
+    // バルーンの本文は 255 文字まで
+    if text.chars().count() > 250 {
+        text = text.chars().take(248).collect::<String>() + "…";
+    }
+    // アイコンは一番重いもの (エラー > 警告 > 情報 > なし)
+    let kind = items.iter().map(|p| p.kind).max().unwrap_or(0);
+    (format!("待っていた通知 ({} 件)", items.len()), text, kind)
 }
 
 static mut APP: Option<App> = None;
@@ -96,6 +126,7 @@ pub fn run() {
             full_notified: HashSet::new(),
             taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
             update_balloon: false,
+            pending: Vec::new(),
         });
 
         apply_menu_theme();
@@ -332,8 +363,48 @@ fn update_icon() {
 }
 
 fn notify(title: &str, text: &str, kind: i32) {
-    app().update_balloon = false;
-    log::info(format!("通知: {title} / {}", text.replace("\r\n", " ")));
+    notify_ex(title, text, kind, false);
+}
+
+/// フルスクリーン中 (設定がオンのとき) はためておき、終わったらまとめて出す
+fn notify_ex(title: &str, text: &str, kind: i32, is_update: bool) {
+    let a = app();
+    if a.settings.defer_in_fullscreen && crate::fullscreen::active() {
+        log::info(format!("フルスクリーン中のため通知を保留: {title} / {}", text.replace("\r\n", " ")));
+        a.pending.push(Pending { title: title.into(), text: text.into(), kind, is_update });
+        unsafe {
+            SetTimer(Some(a.hwnd), TIMER_FULLSCREEN, FULLSCREEN_POLL_MS, None);
+        }
+        return;
+    }
+    show_balloon(title, text, kind);
+    app().update_balloon = is_update;
+}
+
+/// フルスクリーンが終わっていたら、ためていた通知をまとめて出す
+fn flush_pending() {
+    let a = app();
+    if a.pending.is_empty() {
+        unsafe {
+            let _ = KillTimer(Some(a.hwnd), TIMER_FULLSCREEN);
+        }
+        return;
+    }
+    if a.settings.defer_in_fullscreen && crate::fullscreen::active() {
+        return;
+    }
+    unsafe {
+        let _ = KillTimer(Some(a.hwnd), TIMER_FULLSCREEN);
+    }
+    let items = std::mem::take(&mut a.pending);
+    let (title, text, kind) = combine(&items);
+    log::info(format!("フルスクリーンが終わったので、保留していた通知を表示します ({} 件)", items.len()));
+    show_balloon(&title, &text, kind);
+    app().update_balloon = items.iter().any(|p| p.is_update);
+}
+
+fn show_balloon(title: &str, text: &str, kind: i32) {
+    log::info(format!("通知: {title} / {}", text.replace("\r\n", " ").replace('\n', " ")));
     let mut nid = tray_data(1);
     nid.uFlags = NIF_INFO;
     copy_wstr(&mut nid.szInfoTitle, title);
@@ -550,6 +621,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == TIMER_FULLSCREEN => {
+                flush_pending();
+                LRESULT(0)
+            }
             WM_APP_QUIT => {
                 log::info("更新のため終了します");
                 PostQuitMessage(0);
@@ -557,8 +632,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_APP_UPDATE_FOUND => {
                 if let Some(r) = updater::State::load().available() {
-                    notify("GHUB Battery の更新があります", &format!("{} が出ています。クリックすると設定から更新できます", r.tag), 1);
-                    app().update_balloon = true;
+                    notify_ex("GHUB Battery の更新があります", &format!("{} が出ています。クリックすると設定から更新できます", r.tag), 1, true);
                 }
                 LRESULT(0)
             }

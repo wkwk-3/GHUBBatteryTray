@@ -78,6 +78,7 @@
     <None Include="Cargo.lock" />
     <None Include="build.rs" />
     <None Include="README.md" />
+    <None Include="src\fullscreen.rs" />
     <None Include="src\ghub.rs" />
     <None Include="src\health.rs" />
     <None Include="src\hidpp.rs" />

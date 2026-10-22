@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod fullscreen;
 mod ghub;
 mod hidpp;
 mod health;
@@ -387,10 +388,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "2.2.0");
+        assert_eq!(crate::updater::CURRENT, "2.3.0");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v2.2.1").is_newer() && r("v2.3.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v2.2.0").is_newer() && !r("v2.2").is_newer() && !r("v2.1").is_newer() && !r("nightly").is_newer());
+        assert!(r("v2.3.1").is_newer() && r("v2.4.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v2.3.0").is_newer() && !r("v2.3").is_newer() && !r("v2.2.0").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -477,5 +478,30 @@ SHA256: {}", hash.to_uppercase()),
         // オフラインでも、前回一致を確認できたハッシュ値なら確認済み
         assert_eq!(judge(good, Err("offline".into()), "2.1.0", good), Integrity::Verified);
         assert!(matches!(judge(good, Err("offline".into()), "2.1.0", &bad), Integrity::Unverified(_)));
+    }
+
+    #[test]
+    fn pending_notifications_are_combined() {
+        use crate::tray::{combine, Pending};
+        let n = |title: &str, text: &str, kind: i32| Pending { title: title.into(), text: text.into(), kind, is_update: false };
+        // 1 件ならそのまま
+        assert_eq!(combine(&[n("PRO 2", "残り 20%", 2)]), ("PRO 2".into(), "残り 20%".into(), 2));
+        // 複数はまとめて、アイコンは一番重いもの
+        let (title, text, kind) = combine(&[n("PRO 2", "残り 50%", 1), n("PRO 2", "残り 20%", 3), n("Headset", "充電が完了しました", 1)]);
+        assert_eq!(title, "待っていた通知 (3 件)");
+        assert_eq!(text, "・PRO 2: 残り 50%
+・PRO 2: 残り 20%
+・Headset: 充電が完了しました");
+        assert_eq!(kind, 3);
+        // 長すぎる本文は切り詰める (バルーンは 255 文字まで)
+        let many: Vec<Pending> = (0..30).map(|i| n("PRO 2 LIGHTSPEED", &format!("通知 {i}"), 1)).collect();
+        let (_, text, _) = combine(&many);
+        assert!(text.chars().count() <= 250 && text.ends_with('…'));
+    }
+
+    #[test]
+    fn defer_in_fullscreen_defaults_on() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.defer_in_fullscreen);
     }
 }

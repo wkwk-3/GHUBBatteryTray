@@ -43,6 +43,8 @@ pub struct Settings {
     pub level_colors: LevelColors,
     /// 起動時と 1 日 1 回、GitHub で新しいバージョンを確認する
     pub check_updates: bool,
+    /// フルスクリーン中は Windows の通知をためておき、終わったらまとめて出す
+    pub defer_in_fullscreen: bool,
 }
 
 /// 残量 max_percent % 以下ならこの色
@@ -177,6 +179,7 @@ impl Default for Settings {
             theme: Theme::System,
             level_colors: LevelColors::default(),
             check_updates: true,
+            defer_in_fullscreen: true,
         }
     }
 }

@@ -95,9 +95,9 @@ struct Loaded {
 
 #[derive(PartialEq)]
 enum Tab {
+    /// デバイスと通知設定 (最初の画面)
     Devices,
-    Webhook,
-    /// 歯車ボタンで開くアプリの設定
+    /// 歯車ボタンで開くアプリの設定 (Webhook もここ)
     App,
 }
 
@@ -151,14 +151,8 @@ impl SettingsApp {
             loading: None,
             status: String::new(),
             dirty: false,
-            // `--tab webhook` で Webhook タブから開く
-            tab: if std::env::args().any(|a| a == "webhook") {
-                Tab::Webhook
-            } else if std::env::args().any(|a| a == "app") {
-                Tab::App
-            } else {
-                Tab::Devices
-            },
+            // `--tab app` (旧 `--tab webhook` も) で設定ページから開く
+            tab: if std::env::args().any(|a| a == "app" || a == "webhook") { Tab::App } else { Tab::Devices },
             show_url: false,
             webhook_test: None,
             webhook_result: None,
@@ -312,15 +306,18 @@ impl eframe::App for SettingsApp {
         egui::Frame::new().fill(p.bg).inner_margin(20).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
 
-            // ヘッダー: タブとテーマ切り替え
+            // ヘッダー: 左にタイトル (設定ページでは「戻る」)、右にテーマと歯車
             egui::Panel::top("header").frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { bottom: 12, ..Default::default() })).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (tab, text) in [(Tab::Devices, "デバイスと通知"), (Tab::Webhook, "Webhook")] {
-                        let selected = self.tab == tab;
-                        let rt = RichText::new(text).size(15.0).color(if selected { p.text } else { p.sub });
-                        if ui.add(egui::Button::selectable(selected, if selected { rt.strong() } else { rt })).clicked() {
-                            self.tab = tab;
+                    ui.set_min_height(CONTROL_H);
+                    if self.tab == Tab::App {
+                        if ui.add(egui::Button::new(RichText::new("← 戻る").color(p.text)).frame(false)).on_hover_text("デバイスの画面に戻ります").clicked() {
+                            self.tab = Tab::Devices;
                         }
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("設定").size(17.0).strong().color(p.text));
+                    } else {
+                        ui.label(RichText::new("GHUB Battery").size(17.0).strong().color(p.text));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if gear_button(ui, p, self.tab == Tab::App).on_hover_text("設定").clicked() {
@@ -369,7 +366,6 @@ impl eframe::App for SettingsApp {
 
             egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| match self.tab {
                 Tab::Devices => self.devices_tab(ui, p),
-                Tab::Webhook => self.webhook_tab(ui, p),
                 Tab::App => self.app_tab(ui, p),
             });
         });
@@ -445,95 +441,93 @@ impl SettingsApp {
         }
     }
 
-    fn webhook_tab(&mut self, ui: &mut egui::Ui, p: Palette) {
-        egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(20).show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Webhook 通知").size(18.0).strong().color(p.text));
-                info_icon(ui, p, "残量低下・充電完了の通知を Discord / Slack などにも送ります。");
-            });
-            ui.add_space(12.0);
-
-            if ui.checkbox(&mut self.settings.webhook_enabled, RichText::new("Webhook に送信する").size(15.0)).changed() {
-                self.dirty = true;
-            }
-            ui.add_space(10.0);
-
-            const LABEL_W: f32 = 48.0;
-            ui.horizontal(|ui| {
-                ui.add_sized([LABEL_W, CONTROL_H], egui::Label::new(RichText::new("URL").color(p.sub)));
-                let edit = egui::TextEdit::singleline(&mut self.settings.webhook_url)
-                    .password(!self.show_url)
-                    .hint_text("https://discord.com/api/webhooks/...")
-                    .align(egui::Align2::LEFT_CENTER);
-                let width = (ui.available_width() - 80.0).max(200.0);
-                if ui.add_sized([width, CONTROL_H], edit).changed() {
+    /// 設定ページの「Webhook 通知」
+    fn webhook_section(&mut self, ui: &mut egui::Ui, p: Palette) {
+        section(
+            ui,
+            p,
+            "Webhook 通知",
+            "残量低下・充電完了の通知を Discord / Slack などにも送ります。\nフルスクリーン中も待たずにすぐ送ります。\n「保存」で反映されます。",
+            |ui| {
+                if ui.checkbox(&mut self.settings.webhook_enabled, "Webhook に送信する").changed() {
                     self.dirty = true;
                 }
-                if ui.add_sized([72.0, CONTROL_H], egui::Button::new(if self.show_url { "隠す" } else { "表示" })).clicked() {
-                    self.show_url = !self.show_url;
-                }
-            });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.add_sized([LABEL_W, CONTROL_H], egui::Label::new(RichText::new("形式").color(p.sub)));
-                egui::ComboBox::from_id_salt("format")
-                    .selected_text(format_label(self.settings.webhook_format))
-                    .width(220.0)
-                    .show_ui(ui, |ui| {
-                        for f in [WebhookFormat::Discord, WebhookFormat::Slack, WebhookFormat::Json] {
-                            if ui.selectable_value(&mut self.settings.webhook_format, f, format_label(f)).changed() {
-                                self.dirty = true;
+                ui.add_space(10.0);
+
+                const LABEL_W: f32 = 48.0;
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_W, CONTROL_H], egui::Label::new(RichText::new("URL").color(p.sub)));
+                    let edit = egui::TextEdit::singleline(&mut self.settings.webhook_url)
+                        .password(!self.show_url)
+                        .hint_text("https://discord.com/api/webhooks/...")
+                        .align(egui::Align2::LEFT_CENTER);
+                    let width = (ui.available_width() - 80.0).max(200.0);
+                    if ui.add_sized([width, CONTROL_H], edit).changed() {
+                        self.dirty = true;
+                    }
+                    if ui.add_sized([72.0, CONTROL_H], egui::Button::new(if self.show_url { "隠す" } else { "表示" })).clicked() {
+                        self.show_url = !self.show_url;
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_W, CONTROL_H], egui::Label::new(RichText::new("形式").color(p.sub)));
+                    egui::ComboBox::from_id_salt("format")
+                        .selected_text(format_label(self.settings.webhook_format))
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for f in [WebhookFormat::Discord, WebhookFormat::Slack, WebhookFormat::Json] {
+                                if ui.selectable_value(&mut self.settings.webhook_format, f, format_label(f)).changed() {
+                                    self.dirty = true;
+                                }
                             }
+                        });
+                    let help = match self.settings.webhook_format {
+                        WebhookFormat::Discord => "Discord: チャンネル設定 → 連携サービス → ウェブフック で URL を作成できます。",
+                        WebhookFormat::Slack => "Slack: Incoming Webhooks アプリで URL を作成できます。",
+                        WebhookFormat::Json => "汎用 JSON: {\"title\", \"message\", \"device\", \"battery\", \"event\"} を POST します (Home Assistant / n8n など)。",
+                    };
+                    info_icon(ui, p, help);
+                });
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let can_test = self.webhook_test.is_none() && !self.settings.webhook_url.trim().is_empty();
+                    if ui.add_enabled(can_test, egui::Button::new("テスト送信").min_size(Vec2::new(110.0, CONTROL_H))).clicked() {
+                        let (tx, rx) = channel();
+                        let url = self.settings.webhook_url.trim().to_string();
+                        let format = self.settings.webhook_format;
+                        let ctx = ui.ctx().clone();
+                        std::thread::spawn(move || {
+                            let m = webhook::Message { title: "GHUB Battery".into(), text: "テスト送信です".into(), device: "test".into(), battery: 50, event: "test" };
+                            let _ = tx.send(webhook::send(&url, format, &m));
+                            ctx.request_repaint();
+                        });
+                        self.webhook_test = Some(rx);
+                        self.webhook_result = None;
+                    }
+                    match (&self.webhook_test, &self.webhook_result) {
+                        (Some(_), _) => {
+                            ui.label(RichText::new("送信中...").color(p.sub));
                         }
-                    });
-            });
-
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                let can_test = self.webhook_test.is_none() && !self.settings.webhook_url.trim().is_empty();
-                if ui.add_enabled(can_test, egui::Button::new("テスト送信").min_size(Vec2::new(110.0, CONTROL_H))).clicked() {
-                    let (tx, rx) = channel();
-                    let url = self.settings.webhook_url.trim().to_string();
-                    let format = self.settings.webhook_format;
-                    let ctx = ui.ctx().clone();
-                    std::thread::spawn(move || {
-                        let m = webhook::Message { title: "GHUB Battery".into(), text: "テスト送信です".into(), device: "test".into(), battery: 50, event: "test" };
-                        let _ = tx.send(webhook::send(&url, format, &m));
-                        ctx.request_repaint();
-                    });
-                    self.webhook_test = Some(rx);
-                    self.webhook_result = None;
-                }
-                match (&self.webhook_test, &self.webhook_result) {
-                    (Some(_), _) => {
-                        ui.label(RichText::new("送信中...").color(p.sub));
+                        (None, Some(Ok(code))) => {
+                            ui.label(RichText::new(format!("送信できました (HTTP {code})")).color(p.ok));
+                        }
+                        (None, Some(Err(e))) => {
+                            ui.label(RichText::new(format!("失敗: {e}")).color(p.danger));
+                        }
+                        _ => {}
                     }
-                    (None, Some(Ok(code))) => {
-                        ui.label(RichText::new(format!("送信できました (HTTP {code})")).color(p.ok));
-                    }
-                    (None, Some(Err(e))) => {
-                        ui.label(RichText::new(format!("失敗: {e}")).color(p.danger));
-                    }
-                    _ => {}
-                }
-            });
-
-            ui.add_space(16.0);
-            let help = match self.settings.webhook_format {
-                WebhookFormat::Discord => "Discord: チャンネル設定 → 連携サービス → ウェブフック で URL を作成できます。",
-                WebhookFormat::Slack => "Slack: Incoming Webhooks アプリで URL を作成できます。",
-                WebhookFormat::Json => "汎用 JSON: {\"title\", \"message\", \"device\", \"battery\", \"event\"} を POST します (Home Assistant / n8n など)。",
-            };
-            ui.label(RichText::new(help).color(p.sub).size(12.5));
-            ui.label(RichText::new("URL には認証用のトークンが含まれるので、他人に見せないでください。").color(p.sub).size(12.5));
-        });
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("URL には認証用のトークンが含まれるので、他人に見せないでください。").color(p.sub).size(12.0));
+            },
+        );
     }
 }
 
 impl SettingsApp {
-    /// 歯車ボタンで開く設定: アイコン表示 / 起動 / 残量の色
+    /// 歯車ボタンで開く設定: アイコン表示 / 通知 / Webhook / 起動 / アップデート / 残量の色
     fn app_tab(&mut self, ui: &mut egui::Ui, p: Palette) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             section(ui, p, "アイコン表示", "タスクトレイにアイコンを表示するデバイスです。デバイスごとに別のアイコンが表示されます。\n「保存」で反映されます。", |ui| {
@@ -553,6 +547,25 @@ impl SettingsApp {
                     }
                 });
             });
+
+            section(
+                ui,
+                p,
+                "通知",
+                "ゲームや動画などがフルスクリーンで表示されている間は、Windows の通知を出さずにためておき、フルスクリーンが終わったらまとめて表示します。\nWebhook はフルスクリーン中も待たずにすぐ送ります。\n「保存」で反映されます。",
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("フルスクリーン中は通知を待つ").color(p.text));
+                        ui.add_space(8.0);
+                        if toggle_switch(ui, &mut self.settings.defer_in_fullscreen).changed() {
+                            self.dirty = true;
+                        }
+                        ui.label(RichText::new(if self.settings.defer_in_fullscreen { "オン" } else { "オフ" }).color(p.sub));
+                    });
+                },
+            );
+
+            self.webhook_section(ui, p);
 
             section(ui, p, "起動", "オンにすると、Windows にサインインしたときに自動で起動します。\n切り替えるとすぐに反映されます (「保存」は不要)。", |ui| {
                 ui.horizontal(|ui| {
@@ -1004,9 +1017,9 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
                 (None, None) => ("推定容量", "—".into(), false, "放電量 (G HUB が起動しているときに取得) と充電の記録がそろうと表示します。".into()),
             });
             rows.push(match (h.full_runtime_h, battery.and_then(|b| b.max_life_hours)) {
-                (Some(r), _) => ("満充電での持ち", format!("約{r:.0}時間"), true, "実際の放電の記録から計算した、100% から 0% までの時間です。".into()),
-                (None, Some(g)) => ("満充電での持ち", format!("約{g:.0}時間"), true, "G HUB の推定値です。充電の記録がたまると、実測の値に切り替わります。".into()),
-                _ => ("満充電での持ち", "—".into(), false, "充電の記録がたまると表示します。".into()),
+                (Some(r), _) => ("満充電まで", format!("約{r:.0}時間"), true, "実際の放電の記録から計算した、100% から 0% までの時間です。".into()),
+                (None, Some(g)) => ("満充電まで", format!("約{g:.0}時間"), true, "G HUB の推定値です。充電の記録がたまると、実測の値に切り替わります。".into()),
+                _ => ("満充電まで", "—".into(), false, "充電の記録がたまると表示します。".into()),
             });
             rows.push(match h.health {
                 Some(v) => ("容量", format!("{:.0}%", v * 100.0), true, "記録を始めた頃と比べた、今の容量です。".into()),
