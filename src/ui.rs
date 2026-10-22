@@ -3,7 +3,7 @@
 use crate::ghub::{Battery, Source};
 use crate::icon::level_color;
 use crate::settings::{LevelColor, LevelColors};
-use crate::{log, startup};
+use crate::{log, startup, updater};
 use crate::settings::{Rule, Settings, Theme, WebhookFormat};
 use crate::health::{self, Basis, Run};
 use crate::history::{self, Sample};
@@ -122,6 +122,17 @@ struct SettingsApp {
     dark_checked: Instant,
     /// Windows 起動時に開始 (レジストリの状態)
     startup: bool,
+    /// 更新の確認結果
+    update_state: updater::State,
+    /// 確認・更新を実行中
+    update_job: Option<Receiver<UpdateJob>>,
+    /// 直前の確認・更新の結果 (成功か, 文言)
+    update_message: Option<(bool, String)>,
+}
+
+enum UpdateJob {
+    Checked(Result<updater::State, String>),
+    Installed(Result<(), String>),
 }
 
 impl SettingsApp {
@@ -154,6 +165,9 @@ impl SettingsApp {
             dark,
             dark_checked: Instant::now(),
             startup: startup::enabled(),
+            update_state: updater::State::load(),
+            update_job: None,
+            update_message: None,
         };
         app.refresh(&cc.egui_ctx);
         log::info("設定画面を開きました");
@@ -239,6 +253,29 @@ impl SettingsApp {
                 self.webhook_test = None;
             }
         }
+        if let Some(rx) = &self.update_job {
+            if let Ok(job) = rx.try_recv() {
+                self.update_job = None;
+                match job {
+                    UpdateJob::Checked(Ok(state)) => {
+                        self.update_message = Some((true, if state.available().is_some() { "新しいバージョンがあります".into() } else { "最新のバージョンです".into() }));
+                        self.update_state = state;
+                    }
+                    UpdateJob::Checked(Err(e)) => {
+                        log::warn(format!("更新の確認に失敗しました: {e}"));
+                        self.update_message = Some((false, format!("確認できませんでした: {e}")));
+                    }
+                    UpdateJob::Installed(Ok(())) => {
+                        // 新しいバージョンが起動するので、この画面は閉じる
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    UpdateJob::Installed(Err(e)) => {
+                        log::error(format!("更新に失敗しました: {e}"));
+                        self.update_message = Some((false, format!("更新できませんでした: {e}")));
+                    }
+                }
+            }
+        }
         // 「システム」のときは Windows の切り替えに追従する
         if self.settings.theme == Theme::System && self.dark_checked.elapsed().as_secs() >= 2 {
             self.dark_checked = Instant::now();
@@ -259,8 +296,8 @@ fn label(d: &(String, Option<Battery>)) -> &str {
 fn notify_tray() {
     use windows::Win32::Foundation::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
-    unsafe {
-        if let Ok(hwnd) = FindWindowW(crate::tray::WINDOW_CLASS, None) {
+    if let Some(hwnd) = crate::tray::find_window() {
+        unsafe {
             let _ = PostMessageW(Some(hwnd), crate::tray::WM_APP_RELOAD, WPARAM(0), LPARAM(0));
         }
     }
@@ -529,6 +566,8 @@ impl SettingsApp {
                 });
             });
 
+            self.update_section(ui, p);
+
             section(
                 ui,
                 p,
@@ -617,6 +656,97 @@ impl SettingsApp {
                 },
             );
         });
+    }
+}
+
+impl SettingsApp {
+    /// アップデート: 自動確認のオン/オフ、今すぐ確認、更新ボタン
+    fn update_section(&mut self, ui: &mut egui::Ui, p: Palette) {
+        section(
+            ui,
+            p,
+            "アップデート",
+            "GitHub のリリースで新しいバージョンを確認します。自動確認はアプリの起動時と 1 日 1 回です。\n「更新」を押すと、新しいバージョンをダウンロードして入れ替え、アプリを再起動します。設定はそのまま引き継がれます。",
+            |ui| {
+                let busy = self.update_job.is_some();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("現在のバージョン  v{}", updater::CURRENT)).color(p.text));
+                    ui.add_space(16.0);
+                    if ui.add_enabled(!busy, egui::Button::new("今すぐ確認")).clicked() {
+                        let (tx, rx) = channel();
+                        let ctx = ui.ctx().clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(UpdateJob::Checked(updater::check()));
+                            ctx.request_repaint();
+                        });
+                        self.update_job = Some(rx);
+                        self.update_message = None;
+                    }
+                    if busy {
+                        ui.spinner();
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("更新を自動で確認する").color(p.text));
+                    ui.add_space(8.0);
+                    if toggle_switch(ui, &mut self.settings.check_updates).changed() {
+                        self.dirty = true;
+                    }
+                    ui.label(RichText::new(if self.settings.check_updates { "オン" } else { "オフ" }).color(p.sub));
+                });
+
+                if let Some(release) = self.update_state.available().cloned() {
+                    ui.add_space(12.0);
+                    egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, ACCENT)).corner_radius(6).inner_margin(12).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{} が出ています", release.tag)).strong().color(p.text));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let button = egui::Button::new(RichText::new("更新").color(Color32::WHITE).strong()).fill(ACCENT).min_size(Vec2::new(96.0, CONTROL_H));
+                                if ui.add_enabled(!busy, button).clicked() {
+                                    let (tx, rx) = channel();
+                                    let ctx = ui.ctx().clone();
+                                    let r = release.clone();
+                                    std::thread::spawn(move || {
+                                        let _ = tx.send(UpdateJob::Installed(updater::update_and_restart(&r)));
+                                        ctx.request_repaint();
+                                    });
+                                    self.update_job = Some(rx);
+                                    self.update_message = Some((true, "ダウンロードしています...".into()));
+                                }
+                                if ui.add(egui::Button::new("リリースページ").frame(false)).on_hover_text("ブラウザーで GitHub のリリースページを開きます").clicked() {
+                                    updater::open_page(Some(&release));
+                                }
+                            });
+                        });
+                        let notes = release.notes.trim();
+                        if !notes.is_empty() {
+                            ui.add_space(4.0);
+                            egui::CollapsingHeader::new(RichText::new("更新内容").color(p.sub).size(12.5)).id_salt("release_notes").show(ui, |ui| {
+                                egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                                    ui.label(RichText::new(notes).color(p.text).size(12.5));
+                                });
+                            });
+                        }
+                    });
+                }
+
+                if let Some((ok, msg)) = &self.update_message {
+                    ui.add_space(8.0);
+                    let failed = !ok;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(msg).color(if failed { p.danger } else { p.sub }).size(12.5));
+                        if failed && ui.add(egui::Button::new("リリースページを開く").frame(false)).clicked() {
+                            updater::open_page(self.update_state.latest.as_ref());
+                        }
+                    });
+                } else if let Some(r) = self.update_state.latest.as_ref().filter(|r| !r.is_newer()) {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(format!("最新のバージョンです (最新リリース {})", r.tag)).color(p.sub).size(12.5));
+                }
+            },
+        );
     }
 }
 

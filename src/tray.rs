@@ -3,7 +3,7 @@
 
 use crate::ghub::Battery;
 use crate::settings::{self, Settings, Theme};
-use crate::{hidpp, icon, log, sources, startup, webhook};
+use crate::{hidpp, icon, log, sources, startup, updater, webhook};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,13 @@ const WM_APP_UPDATE: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
 /// 設定画面が保存したときに送ってくる
 pub const WM_APP_RELOAD: u32 = WM_APP + 3;
+/// 更新のために終了してほしい (設定画面から)
+pub const WM_APP_QUIT: u32 = WM_APP + 4;
+/// 新しいバージョンが見つかった (確認スレッドから)
+const WM_APP_UPDATE_FOUND: u32 = WM_APP + 5;
+/// 通知 (バルーン) がクリックされた
+const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
+const ID_UPDATE: u32 = 6;
 
 const ID_NONE: u32 = 999;
 const ID_DEVICE: u32 = 1000;
@@ -52,6 +59,8 @@ struct App {
     /// 満充電を通知済みのデバイス
     full_notified: HashSet<String>,
     taskbar_created: u32,
+    /// 最後に出した通知が更新のお知らせか (クリックで設定を開く)
+    update_balloon: bool,
 }
 
 static mut APP: Option<App> = None;
@@ -69,7 +78,8 @@ pub fn run() {
         let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: instance.into(), lpszClassName: WINDOW_CLASS, ..Default::default() };
         RegisterClassW(&wc);
 
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), WINDOW_CLASS, w!("GHUB Battery"), WINDOW_STYLE(0), 0, 0, 0, 0, None, None, Some(instance.into()), None)
+        let title = window_title();
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), WINDOW_CLASS, &title, WINDOW_STYLE(0), 0, 0, 0, 0, None, None, Some(instance.into()), None)
             .expect("CreateWindowExW");
 
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -85,15 +95,21 @@ pub fn run() {
             notified: HashSet::new(),
             full_notified: HashSet::new(),
             taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
+            update_balloon: false,
         });
 
         apply_menu_theme();
         update_icon();
 
         log::info(format!("アプリを開始しました (バージョン {})", env!("CARGO_PKG_VERSION")));
+        updater::cleanup_old();
+        if std::env::args().any(|a| a == "--after-update") {
+            notify("GHUB Battery", &format!("v{} に更新しました", updater::CURRENT), 1);
+        }
 
         let hwnd_raw = hwnd.0 as isize;
         std::thread::spawn(move || worker(hwnd_raw, shared, refresh));
+        std::thread::spawn(move || update_checker(hwnd_raw));
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -135,6 +151,58 @@ fn log_changes(prev: &[Battery], list: &[Battery]) {
     }
     if list.is_empty() && !prev.is_empty() {
         log::warn("バッテリー情報を取得できませんでした (直接通信・G HUB API・settings.db すべて)");
+    }
+}
+
+/// 設定フォルダーごとに別のウィンドウ名 (設定画面から自分の常駐だけに知らせるため)
+fn window_title() -> HSTRING {
+    HSTRING::from(format!("GHUB Battery {}", settings::instance_id()))
+}
+
+/// 同じ設定フォルダーの常駐ウィンドウ
+pub fn find_window() -> Option<HWND> {
+    unsafe { FindWindowW(WINDOW_CLASS, &window_title()).ok().filter(|h| !h.is_invalid()) }
+}
+
+/// 常駐に終了を頼む (更新時)
+pub fn request_quit() {
+    if let Some(hwnd) = find_window() {
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_APP_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// 更新の確認: 起動時と 1 日 1 回 (設定でオフなら何もしない)
+fn update_checker(hwnd: isize) {
+    // 更新直後は古い設定画面が .old を掴んでいることがあるので、少し待って消し直す
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_secs(5));
+        updater::cleanup_old();
+    }
+    let mut first = true;
+    loop {
+        if Settings::load().check_updates {
+            let state = updater::State::load();
+            if first || crate::history::now() >= state.last_check + updater::CHECK_INTERVAL_SECS {
+                match updater::check() {
+                    Ok(mut state) => {
+                        if let Some(tag) = state.available().map(|r| r.tag.clone()) {
+                            if state.notified_tag != tag {
+                                state.notified_tag = tag;
+                                state.save();
+                                unsafe {
+                                    let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE_FOUND, WPARAM(0), LPARAM(0));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => log::warn(format!("更新の確認に失敗しました: {e}")),
+                }
+            }
+        }
+        first = false;
+        std::thread::sleep(Duration::from_secs(30 * 60));
     }
 }
 
@@ -264,6 +332,7 @@ fn update_icon() {
 }
 
 fn notify(title: &str, text: &str, kind: i32) {
+    app().update_balloon = false;
     log::info(format!("通知: {title} / {}", text.replace("\r\n", " ")));
     let mut nid = tray_data(1);
     nid.uFlags = NIF_INFO;
@@ -316,9 +385,18 @@ fn check_notifications() {
 }
 
 fn open_settings() {
-    // 設定画面は別プロセス。閉じればメモリはすべて解放される
+    open_settings_tab(None);
+}
+
+/// 設定画面は別プロセス。閉じればメモリはすべて解放される
+fn open_settings_tab(tab: Option<&str>) {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).arg("--settings").spawn();
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--settings");
+        if let Some(tab) = tab {
+            cmd.args(["--tab", tab]);
+        }
+        let _ = cmd.spawn();
     }
 }
 
@@ -345,6 +423,9 @@ fn show_menu() {
         add(MF_STRING | if app().settings.tray_display_devices.is_empty() { MF_CHECKED } else { MF_UNCHECKED }, ID_NONE, "表示しない");
         add(MF_SEPARATOR, 0, "");
         add(MF_STRING | MF_DEFAULT, ID_SETTINGS, "設定を開く...");
+        if let Some(r) = updater::State::load().available() {
+            add(MF_STRING, ID_UPDATE, &format!("更新があります ({})...", r.tag));
+        }
         add(MF_STRING, ID_REFRESH, "残量を今すぐ再取得");
         add(MF_STRING | if startup::enabled() { MF_CHECKED } else { MF_UNCHECKED }, ID_STARTUP, "Windows 起動時に開始");
         let no_url = app().settings.webhook_url.trim().is_empty();
@@ -371,6 +452,7 @@ fn show_menu() {
         match cmd {
             0 => {}
             ID_SETTINGS => open_settings(),
+            ID_UPDATE => open_settings_tab(Some("app")),
             ID_REFRESH => app().refresh.store(true, Ordering::Relaxed),
             ID_STARTUP => startup::set(!startup::enabled()),
             ID_EXIT => {
@@ -463,7 +545,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 match lparam.0 as u32 {
                     WM_LBUTTONUP => open_settings(),
                     WM_RBUTTONUP => show_menu(),
+                    NIN_BALLOONUSERCLICK if app().update_balloon => open_settings_tab(Some("app")),
                     _ => {}
+                }
+                LRESULT(0)
+            }
+            WM_APP_QUIT => {
+                log::info("更新のため終了します");
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            WM_APP_UPDATE_FOUND => {
+                if let Some(r) = updater::State::load().available() {
+                    notify("GHUB Battery の更新があります", &format!("{} が出ています。クリックすると設定から更新できます", r.tag), 1);
+                    app().update_balloon = true;
                 }
                 LRESULT(0)
             }

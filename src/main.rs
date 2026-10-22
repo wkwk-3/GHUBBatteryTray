@@ -10,6 +10,7 @@ mod settings;
 mod sources;
 mod startup;
 mod tray;
+mod updater;
 mod webhook;
 mod ui;
 
@@ -21,15 +22,67 @@ fn main() {
     let settings_mode = std::env::args().any(|a| a == "--settings");
 
     // 二重起動しない (設定フォルダーごと。テスト用に別フォルダーで動かすときはぶつからない)
-    let dir = settings::dir().to_string_lossy().to_lowercase();
-    let hash = dir.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
-    let name = HSTRING::from(format!(r"Local\GHUBBatteryTray.{}.{hash:016x}", if settings_mode { "Settings" } else { "Tray" }));
-    let _mutex = unsafe { CreateMutexW(None, true, &name) };
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+    let name = HSTRING::from(format!(r"Local\GHUBBatteryTray.{}.{}", if settings_mode { "Settings" } else { "Tray" }, settings::instance_id()));
+    // 更新直後は、古い常駐が終わるまで最大 20 秒待つ
+    let after_update = std::env::args().any(|a| a == "--after-update");
+    let mut tries = if after_update { 100 } else { 1 };
+    let _mutex = loop {
+        let mutex = unsafe { CreateMutexW(None, true, &name) };
+        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            break mutex;
+        }
+        if let Ok(h) = mutex {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+            }
+        }
+        tries -= 1;
+        if tries == 0 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+
+    if !settings_mode && !integrity_ok() {
         return;
     }
 
     if settings_mode { ui::run() } else { tray::run() }
+}
+
+/// exe が GitHub で公開しているものと同じか確かめる。一致しなければ知らせて false
+fn integrity_ok() -> bool {
+    // 開発中 (Debug ビルド / GHBT_SKIP_INTEGRITY=1) は確認しない
+    if cfg!(debug_assertions) || std::env::var("GHBT_SKIP_INTEGRITY").is_ok_and(|v| v == "1") {
+        return true;
+    }
+    match updater::verify_self() {
+        updater::Integrity::Verified => {
+            log::info(format!("exe のハッシュ値が GitHub の v{} と一致しました", updater::CURRENT));
+            true
+        }
+        updater::Integrity::Unverified(reason) => {
+            log::warn(format!("exe のハッシュ値を確認できませんでした ({reason})。起動を続けます"));
+            true
+        }
+        updater::Integrity::Mismatch { tag, expected, actual, page_url } => {
+            log::error(format!("exe のハッシュ値が GitHub の {tag} と一致しません。起動を中止します (GitHub: {expected} / この exe: {actual})"));
+            use windows::Win32::UI::WindowsAndMessaging::*;
+            let text = HSTRING::from(format!(
+                "この GHUBBatteryTray.exe (v{}) は、GitHub で公開されている {tag} のファイルと一致しません。\n\n\
+                 改ざんや破損の可能性があるため、起動を中止しました。\n\
+                 正規の exe をダウンロードし直してください。\n\n\
+                 GitHub: {expected}\nこの exe: {actual}\n\n\
+                 リリースページを開きますか？",
+                updater::CURRENT
+            ));
+            let answer = unsafe { MessageBoxW(None, &text, &HSTRING::from("GHUB Battery - 起動を中止しました"), MB_YESNO | MB_ICONERROR | MB_SETFOREGROUND) };
+            if answer == IDYES {
+                updater::open_page(Some(&updater::Release { page_url, ..Default::default() }));
+            }
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -325,5 +378,104 @@ mod tests {
         // 古い設定ファイル (色の項目なし) は既定の色
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.level_colors, LevelColors::default());
+    }
+
+    #[test]
+    fn updater_versions() {
+        use crate::updater::{parse_version, Release};
+        assert_eq!(parse_version("v2.10.3"), Some((2, 10, 3)));
+        assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
+        assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
+        assert_eq!(parse_version("latest"), None);
+        assert_eq!(crate::updater::CURRENT, "2.2.0");
+        let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
+        assert!(r("v2.2.1").is_newer() && r("v2.3.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v2.2.0").is_newer() && !r("v2.2").is_newer() && !r("v2.1").is_newer() && !r("nightly").is_newer());
+    }
+
+    #[test]
+    fn updater_parses_github_release() {
+        let hash = "a".repeat(64);
+        let json = serde_json::json!({
+            "tag_name": "v2.2.0",
+            "html_url": "https://github.com/wkwk-3/GHUBBatteryTray/releases/tag/v2.2.0",
+            "body": format!("新機能
+SHA256: {}", hash.to_uppercase()),
+            "assets": [
+                {"name": "README.md", "browser_download_url": "https://x/readme", "size": 10},
+                {"name": "GHUBBatteryTray.exe", "browser_download_url": "https://x/GHUBBatteryTray.exe", "size": 1234}
+            ]
+        });
+        let r = crate::updater::parse_release(&json).unwrap();
+        assert_eq!((r.tag.as_str(), r.exe_url.as_str(), r.exe_size), ("v2.2.0", "https://x/GHUBBatteryTray.exe", 1234));
+        assert_eq!(r.sha256, Some(hash));
+        let no_exe = serde_json::json!({"tag_name": "v2.2.0", "assets": []});
+        assert!(crate::updater::parse_release(&no_exe).is_err());
+    }
+
+    #[test]
+    fn updater_verify_and_install() {
+        use crate::updater::{install, old_path, verify, Release};
+        use sha2::Digest;
+        let dir = std::env::temp_dir().join(format!("ghbt_update_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let new_exe = dir.join("new.exe");
+        let content = b"MZ new version".to_vec();
+        std::fs::write(&new_exe, &content).unwrap();
+        let sha: String = sha2::Sha256::digest(&content).iter().map(|b| format!("{b:02x}")).collect();
+        let good = Release { exe_size: content.len() as u64, sha256: Some(sha), ..Default::default() };
+        assert!(verify(&new_exe, &good).is_ok());
+        assert!(verify(&new_exe, &Release { exe_size: 1, ..Default::default() }).is_err());
+        assert!(verify(&new_exe, &Release { sha256: Some("0".repeat(64)), ..Default::default() }).is_err());
+        std::fs::write(dir.join("not.exe"), b"<html>").unwrap();
+        assert!(verify(&dir.join("not.exe"), &Release::default()).is_err());
+
+        // 入れ替え: 今の exe は .old に、新しい中身が同じ場所に
+        let current = dir.join("GHUBBatteryTray.exe");
+        std::fs::write(&current, b"MZ old version").unwrap();
+        install(&new_exe, &current).unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), content);
+        assert_eq!(std::fs::read(old_path(&current)).unwrap(), b"MZ old version");
+        // 新しい exe が無いときは元に戻る
+        let _ = std::fs::remove_file(old_path(&current));
+        assert!(install(&dir.join("missing.exe"), &current).is_err());
+        assert_eq!(std::fs::read(&current).unwrap(), content);
+    }
+
+    /// GitHub の API が返すリリース一覧と同じ形 (2026-10 時点の実データを元にしたもの)
+    fn github_releases() -> serde_json::Value {
+        serde_json::json!([
+            {"tag_name": "v2.1", "draft": false, "html_url": "https://github.com/wkwk-3/GHUBBatteryTray/releases/tag/v2.1", "body": "",
+             "assets": [{"name": "GHUBBatteryTray.exe", "size": 5954048, "browser_download_url": "https://x/v2.1/GHUBBatteryTray.exe",
+                         "digest": "sha256:c411c77567d9f22c6dbf13d72d881f3154f6ed1d1e735738a0ff8edcf3e46bda"}]},
+            {"tag_name": "2.0", "draft": false, "body": "",
+             "assets": [{"name": "GHUBBatteryTray.exe", "size": 5778944, "browser_download_url": "https://x/2.0/GHUBBatteryTray.exe",
+                         "digest": "sha256:54365574b744745e8295001c53c0d52036242550d0071ec2ce78dba70550c352"}]}
+        ])
+    }
+
+    #[test]
+    fn digest_from_github_is_used_for_download() {
+        let list = github_releases();
+        let r = crate::updater::parse_release(&list[0]).unwrap();
+        assert_eq!(r.sha256.as_deref(), Some("c411c77567d9f22c6dbf13d72d881f3154f6ed1d1e735738a0ff8edcf3e46bda"));
+    }
+
+    #[test]
+    fn integrity_judgement() {
+        use crate::updater::{judge, Integrity};
+        let good = "c411c77567d9f22c6dbf13d72d881f3154f6ed1d1e735738a0ff8edcf3e46bda";
+        let bad = "0".repeat(64);
+        // タグ v2.1 とバージョン 2.1.0 は同じ
+        assert_eq!(judge(good, Ok(github_releases()), "2.1.0", ""), Integrity::Verified);
+        assert!(matches!(judge(&bad, Ok(github_releases()), "2.1.0", ""), Integrity::Mismatch { ref tag, .. } if tag == "v2.1"));
+        // 2.0 のタグも見つかる
+        assert!(matches!(judge(&bad, Ok(github_releases()), "2.0.0", ""), Integrity::Mismatch { ref tag, .. } if tag == "2.0"));
+        // リリースが無いバージョン / オフラインは起動を止めない
+        assert!(matches!(judge(&bad, Ok(github_releases()), "9.9.9", ""), Integrity::Unverified(_)));
+        assert!(matches!(judge(&bad, Err("offline".into()), "2.1.0", ""), Integrity::Unverified(_)));
+        // オフラインでも、前回一致を確認できたハッシュ値なら確認済み
+        assert_eq!(judge(good, Err("offline".into()), "2.1.0", good), Integrity::Verified);
+        assert!(matches!(judge(good, Err("offline".into()), "2.1.0", &bad), Integrity::Unverified(_)));
     }
 }

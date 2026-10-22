@@ -41,6 +41,8 @@ pub struct Settings {
     pub theme: Theme,
     /// 残量ごとの色
     pub level_colors: LevelColors,
+    /// 起動時と 1 日 1 回、GitHub で新しいバージョンを確認する
+    pub check_updates: bool,
 }
 
 /// 残量 max_percent % 以下ならこの色
@@ -174,8 +176,16 @@ impl Default for Settings {
             webhook_format: WebhookFormat::Discord,
             theme: Theme::System,
             level_colors: LevelColors::default(),
+            check_updates: true,
         }
     }
+}
+
+/// 設定フォルダーごとの識別子 (二重起動防止・ウィンドウ名に使う)
+pub fn instance_id() -> String {
+    let dir = dir().to_string_lossy().to_lowercase();
+    let hash = dir.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    format!("{hash:016x}")
 }
 
 pub fn dir() -> PathBuf {

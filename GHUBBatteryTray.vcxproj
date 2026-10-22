@@ -90,6 +90,7 @@
     <None Include="src\sources.rs" />
     <None Include="src\tray.rs" />
     <None Include="src\ui.rs" />
+    <None Include="src\updater.rs" />
     <None Include="src\webhook.rs" />
     <Image Include="assets\app.ico" />
   </ItemGroup>
