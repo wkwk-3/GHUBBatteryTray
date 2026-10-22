@@ -217,3 +217,4 @@ pub fn fetch_agent() -> Option<Vec<Battery>> {
         }
     }
 }
+

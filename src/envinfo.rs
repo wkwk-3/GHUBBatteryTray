@@ -20,7 +20,7 @@ pub fn log_startup(s: &Settings) {
     let rules: usize = s.device_notifications.values().map(Vec::len).sum();
     let on = |b: bool| if b { "オン" } else { "オフ" };
     crate::log::info("I002", format!(
-        "設定: テーマ {} / アイコン表示 {} 台 / 通知ルール {} 件 ({} 台) / フルスクリーン中の保留 {} / 更新確認 {} / Webhook {} / Windows 起動時に開始 {} / 詳細ログ {}",
+        "設定: テーマ {} / アイコン表示 {} 台 / 通知ルール {} 件 ({} 台) / フルスクリーン中の保留 {} / 更新確認 {} / Webhook {} / Windows 起動時に開始 {} / 詳細ログ {} / 言語 {:?} ({:?})",
         format!("{:?}", s.theme),
         s.tray_display_devices.len(),
         rules,
@@ -30,6 +30,8 @@ pub fn log_startup(s: &Settings) {
         on(s.webhook_enabled),
         on(crate::startup::enabled()),
         on(crate::log::debug_enabled()),
+        s.language,
+        crate::i18n::current(),
     ));
 }
 

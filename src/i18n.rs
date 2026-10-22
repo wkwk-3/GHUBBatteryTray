@@ -155,9 +155,13 @@ pub fn pct(v: impl Display) -> String {
     f(t().percent_fmt, &[&v])
 }
 
+/// 必要になったときだけ読み込む予備のフォント (韓国語・簡体字中国語)。1 つ 13〜19 MB あるので常には読まない
+pub const EXTRA_FONTS: [&str; 2] = ["malgun.ttf", "msyh.ttc"];
+
 /// 言語ごとの見た目の調整 (フォント・文字の大きさ・文言の長さに合わせた幅)
 pub struct Style {
     /// 使うフォント (C:\Windows\Fonts のファイル名、先頭から優先)。見つからなければ次へ
+    /// 他の言語の文字 (言語の一覧の「한국어」「简体中文」など) 用のフォントは、必要になったときだけ足す (EXTRA_FONTS)
     pub fonts: &'static [&'static str],
     /// フォントの字面を枠の上下中央に合わせる量 (文字サイズ比)
     pub y_offset: f32,

@@ -142,8 +142,16 @@ pub fn run() {
         }
 
         let hwnd_raw = hwnd.0 as isize;
-        std::thread::spawn(move || worker(hwnd_raw, shared, refresh));
-        std::thread::spawn(move || update_checker(hwnd_raw));
+        // デバイスからの通知を待ち受け、届いたらすぐ読み直す
+        let wake = refresh.clone();
+        spawn_named("listener", move || {
+            hidpp::listen(move |why| {
+                log::debug("D012", format!("今すぐ読み直します ({why})"));
+                wake.store(true, Ordering::Relaxed);
+            })
+        });
+        spawn_named("worker", move || worker(hwnd_raw, shared, refresh));
+        spawn_named("update_checker", move || update_checker(hwnd_raw));
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -246,16 +254,24 @@ fn update_checker(hwnd: isize) {
     }
 }
 
+/// 名前付きのスレッド。作れなければログに残す
+fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
+    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
+        log::error("E016", format!("スレッド {name} を開始できませんでした: {e}"));
+    }
+}
+
 /// 取得スレッド
 fn worker(hwnd: isize, shared: Arc<Mutex<Shared>>, refresh: Arc<AtomicBool>) {
     let mut reader = hidpp::Reader::new();
     let mut recorder = crate::history::Recorder::default();
     let mut prev: Vec<Battery> = Vec::new();
     loop {
+        let started = std::time::Instant::now();
         let list = sources::collect(&mut reader);
         if log::debug_enabled() {
             let summary: Vec<String> = list.iter().map(|b| format!("{} {}%{}{} [{}]", b.label(), b.percentage, if b.charging { " 充電中" } else { "" }, if b.asleep { " スリープ" } else { "" }, b.source.map(|s| s.label()).unwrap_or("?"))).collect();
-            log::debug("D006", format!("取得結果: {}", if summary.is_empty() { "なし".into() } else { summary.join(", ") }));
+            log::debug("D006", format!("取得結果: {} ({} ms)", if summary.is_empty() { "なし".into() } else { summary.join(", ") }, started.elapsed().as_millis()));
         }
         recorder.record(&list);
         if let Ok(mut stats) = STATS.lock() {
@@ -374,9 +390,8 @@ fn update_icon() {
         nid.uFlags = NIF_ICON | NIF_TIP;
         nid.hIcon = new_icon;
         copy_wstr(&mut nid.szTip, &tip);
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
-        }
+        let ok = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() };
+        log::problem("tray_modify", (!ok).then(|| ("W015", format!("トレイアイコンを更新できません (番号 {}): {}", i + 1, windows::core::Error::from_thread()))), ("I043", "トレイアイコンを更新できるようになりました"));
         icon::destroy(std::mem::replace(&mut a.icons[i], new_icon));
     }
 }
@@ -434,8 +449,8 @@ fn show_balloon(title: &str, text: &str, kind: i32) {
         3 => NIIF_ERROR,
         _ => NIIF_NONE,
     };
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() } {
+        log::warn("W016", format!("通知を表示できませんでした: {}", windows::core::Error::from_thread()));
     }
 }
 

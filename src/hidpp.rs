@@ -287,6 +287,195 @@ impl Reader {
     }
 }
 
+// ───────────── 通知の待ち受け ─────────────
+//
+// 受信機・直結デバイスのベンダー定義コレクションを開いたままにして、デバイスから届く通知を待つ。
+// - 統合バッテリー (0x1004) / バッテリー状態 (0x1000) の変化通知 (残量・充電の開始と終了)
+// - 受信機の接続通知 (HID++ 1.0 の 0x41: 接続・切断・スリープからの復帰)
+// - しばらく通信がなかったデバイスからの通信 (スリープからの復帰とみなす)
+// を受けたら on_change を呼ぶ (取得スレッドに「今すぐ読み直す」を知らせる)。
+// 受信機を抜いたときは読み込みエラーで気付いて閉じ、挿し直されるまで数秒ごとに探し直す。
+// Windows では同じ HID を複数開くと、届いたデータはそれぞれに配られるので、取得スレッドの読み取りとは干渉しない。
+
+/// 通知の種類
+#[derive(Clone, Debug, PartialEq)]
+pub enum Notice {
+    /// 残量・充電状態の変化 (デバイス番号, 残量%, 充電中, 満充電)
+    Battery(u8, i32, bool, bool),
+    /// 接続・切断 (受信機の 0x41 通知)。(デバイス番号, 接続中)
+    Link(u8, bool),
+}
+
+/// 受け取ったデータを通知として読む。battery = デバイス番号ごとの (バッテリー機能の ID, 機能番号)
+pub fn parse_notice(buf: &[u8], battery: &[(u8, u16, u8)]) -> Option<Notice> {
+    if buf.len() < 7 {
+        return None;
+    }
+    let index = buf[1];
+    // HID++ 1.0: 受信機のデバイス接続通知 (短い報告 0x10 / 長い報告 0x11)。params[0] の bit6 = 切断
+    if buf[2] == 0x41 && (buf[0] == 0x10 || buf[0] == REPORT_LONG) {
+        return Some(Notice::Link(index, buf[4] & 0x40 == 0));
+    }
+    // HID++ 2.0 のブロードキャスト: function 0 / software id 0
+    if buf[0] != REPORT_LONG || buf[3] != 0x00 {
+        return None;
+    }
+    let (_, id, _) = battery.iter().find(|(i, _, f)| *i == index && *f == buf[2])?;
+    match *id {
+        FEATURE_UNIFIED_BATTERY => Some(Notice::Battery(index, buf[4] as i32, matches!(buf[6], 1 | 2 | 3), buf[6] == 3)),
+        FEATURE_BATTERY_STATUS => Some(Notice::Battery(index, buf[4] as i32, matches!(buf[6], 1..=4), buf[6] == 3)),
+        _ => None,
+    }
+}
+
+/// これより長く通信がなかったデバイスから届いたら、スリープからの復帰とみなす
+const WAKE_GAP: Duration = Duration::from_secs(120);
+/// 受信機が見つからないときに探し直す間隔
+const RETRY: Duration = Duration::from_secs(3);
+/// 眠っていたデバイスが起きたときなどに探し直す最短の間隔
+const MIN_REDISCOVER: Duration = Duration::from_secs(30);
+/// 新しい受信機・眠っていたデバイスのために探し直す間隔
+const REDISCOVER: Duration = Duration::from_secs(300);
+
+struct Opened {
+    dev: HidDevice,
+    /// (デバイス番号, バッテリー機能の ID, 機能番号)
+    battery: Vec<(u8, u16, u8)>,
+    long: bool,
+}
+
+/// 開けるコレクションをすべて開き、デバイスごとのバッテリー機能の番号を調べる
+fn discover(api: &mut HidApi) -> Vec<Opened> {
+    if let Err(e) = api.reset_devices().and_then(|_| api.add_devices(VENDOR_LOGITECH, 0)) {
+        crate::log::problem("listen_scan", Some(("W017", format!("通知の待ち受け: HID デバイスの一覧を取得できません: {e}"))), ("", ""));
+        return Vec::new();
+    }
+    crate::log::problem("listen_scan", None, ("I044", "通知の待ち受け: HID デバイスの一覧を取得できるようになりました"));
+    let paths: Vec<_> = api.device_list().filter(|d| d.usage_page() == 0xFF00 && matches!(d.usage(), 1 | 2)).map(|d| (d.path().to_owned(), d.usage() == 2)).collect();
+    let mut opened = Vec::new();
+    for (path, long) in paths {
+        let dev = match api.open_path(&path) {
+            Ok(dev) => dev,
+            Err(e) => {
+                crate::log::debug("D013", format!("通知の待ち受け: {} を開けません: {e}", path.to_string_lossy()));
+                continue;
+            }
+        };
+        let mut battery = Vec::new();
+        if long {
+            let direct = Channel { dev: &dev, index: 0xFF };
+            let indices: Vec<u8> = if direct.ping() && direct.feature(FEATURE_DEVICE_NAME).is_some() { vec![0xFF] } else { (1..=6).collect() };
+            for index in indices {
+                let ch = Channel { dev: &dev, index };
+                if ch.ping() {
+                    if let Some((id, f)) = ch.battery_feature() {
+                        battery.push((index, id, f));
+                    }
+                }
+            }
+        }
+        opened.push(Opened { dev, battery, long });
+    }
+    opened
+}
+
+/// 通知を待ち続ける (戻らない)。on_change は理由 (ログ用) を受け取る
+pub fn listen(on_change: impl Fn(&str)) -> ! {
+    #[allow(deprecated)]
+    let mut api = loop {
+        match HidApi::new_without_enumerate() {
+            Ok(api) => break api,
+            Err(e) => {
+                crate::log::problem("listen_init", Some(("W014", format!("通知の待ち受けを開始できません: {e}"))), ("", ""));
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
+    };
+    let mut opened: Vec<Opened> = Vec::new();
+    let mut discovered_at: Option<Instant> = None;
+    let mut last_seen: std::collections::HashMap<(usize, u8), Instant> = std::collections::HashMap::new();
+    loop {
+        let due = match discovered_at {
+            None => true,
+            Some(t) if opened.is_empty() => t.elapsed() >= RETRY,
+            Some(t) => t.elapsed() >= REDISCOVER,
+        };
+        if due {
+            let had = opened.iter().filter(|o| o.long).map(|o| o.battery.len()).sum::<usize>();
+            opened = discover(&mut api);
+            discovered_at = Some(Instant::now());
+            last_seen.clear();
+            let found = opened.iter().filter(|o| o.long).map(|o| o.battery.len()).sum::<usize>();
+            if found != had {
+                crate::log::info("I040", format!("通知の待ち受け: {} 個の接続口、{found} 台のデバイス", opened.len()));
+                if found > had {
+                    on_change("デバイスが見つかった");
+                }
+            }
+        }
+        if opened.is_empty() {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+
+        let wait = (200 / opened.len().max(1)).max(20) as i32;
+        let mut broken = false;
+        let mut rediscover = false;
+        for (n, o) in opened.iter().enumerate() {
+            let mut buf = [0u8; 20];
+            match o.dev.read_timeout(&mut buf, wait) {
+                Ok(0) => {}
+                Ok(len) => {
+                    let buf = &buf[..len];
+                    let index = buf.get(1).copied().unwrap_or(0);
+                    // 取得スレッドへの応答 (software id 付き) は無視する
+                    if buf.len() >= 4 && buf[0] == REPORT_LONG && buf[3] & 0x0F == SOFTWARE_ID {
+                        continue;
+                    }
+                    let gap = last_seen.insert((n, index), Instant::now()).map(|t| t.elapsed());
+                    match parse_notice(buf, &o.battery) {
+                        Some(Notice::Battery(i, pct, charging, full)) => {
+                            crate::log::debug("D009", format!("通知: 番号 {i} {pct}%{}{}", if charging { " 充電中" } else { "" }, if full { " 満充電" } else { "" }));
+                            on_change("残量・充電状態の通知");
+                        }
+                        Some(Notice::Link(i, up)) => {
+                            crate::log::debug("D010", format!("通知: 番号 {i} {}", if up { "接続" } else { "切断" }));
+                            if up && !o.battery.iter().any(|b| b.0 == i) {
+                                rediscover = true;
+                            }
+                            on_change("接続状態の通知");
+                        }
+                        None => {
+                            if o.long && index != 0xFF && !o.battery.iter().any(|b| b.0 == index) && (1..=6).contains(&index) {
+                                // 調べたときに眠っていたデバイスが起きた
+                                rediscover = true;
+                                on_change("デバイスの復帰");
+                            } else if gap.is_none_or(|g| g >= WAKE_GAP) && o.battery.iter().any(|b| b.0 == index) {
+                                crate::log::debug("D011", format!("通知: 番号 {index} からの通信 (スリープからの復帰)"));
+                                on_change("スリープからの復帰");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    broken = true;
+                    crate::log::debug("D014", format!("通知の待ち受け: 読み込みエラー: {e}"));
+                }
+            }
+        }
+        if broken {
+            // 受信機を抜いた・ドライバーが入れ替わったなど。閉じて探し直す
+            crate::log::info("I041", "受信機との通信が切れました。探し直します");
+            opened.clear();
+            discovered_at = Some(Instant::now());
+            on_change("受信機の取り外し");
+        } else if rediscover && discovered_at.is_none_or(|t| t.elapsed() >= MIN_REDISCOVER) {
+            // 調べ直しは 1 秒ほどかかるので、続けて起きても間を空ける
+            discovered_at = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod probe {
     use super::*;
@@ -350,3 +539,4 @@ mod probe {
         }
     }
 }
+

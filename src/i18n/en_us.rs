@@ -2,7 +2,7 @@ use super::{Style, Texts};
 
 pub const C: Texts = Texts {
     style: Style {
-        fonts: &["segoeui.ttf", "YuGothM.ttc", "malgun.ttf", "msyh.ttc"],
+        fonts: &["segoeui.ttf", "YuGothM.ttc"],
         y_offset: 0.0,
         body: 14.0,
         rule_cols: [60.0, 130.0, 110.0, 60.0],

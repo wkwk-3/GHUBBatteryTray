@@ -109,6 +109,8 @@ struct SettingsApp {
     runs: HashMap<String, Vec<Run>>,
     /// デバイス名 (小文字) -> 1 時間ごとの長期の統計
     stats: HashMap<String, Vec<crate::stats::Hour>>,
+    /// 統計の計算結果 (デバイス名 (小文字) -> (計算した時刻, 結果))。再描画のたびに計算しないよう使い回す
+    analyzed: HashMap<String, (Instant, health::Health)>,
     loading: Option<Receiver<Loaded>>,
     /// 選択中のデバイスの詳細 (アコーディオン) を開いているか
     expanded: bool,
@@ -161,6 +163,7 @@ impl SettingsApp {
             history: HashMap::new(),
             runs: HashMap::new(),
             stats: HashMap::new(),
+            analyzed: HashMap::new(),
             // `--expand` で詳細を開いた状態で起動
             expanded: std::env::args().any(|a| a == "--expand"),
             loading: None,
@@ -276,6 +279,7 @@ impl SettingsApp {
                 self.history = history;
                 self.runs = runs;
                 self.stats = stats;
+                self.analyzed.clear();
                 self.loading = None;
                 self.status = self.source_status();
                 let names = self.device_names();
@@ -436,8 +440,21 @@ impl SettingsApp {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.devices_tab_body(ui, p));
     }
 
+    /// 統計の計算結果。読み込み直したときと、1 分たったときだけ計算し直す
+    fn health_of(&mut self, key: &str) -> health::Health {
+        if let Some((_, h)) = self.analyzed.get(key).filter(|(at, _)| at.elapsed().as_secs() < 60) {
+            return h.clone();
+        }
+        let runs = self.runs.get(key).map(Vec::as_slice).unwrap_or(&[]);
+        let hours = self.stats.get(key).map(Vec::as_slice).unwrap_or(&[]);
+        let h = crate::stats::analyze(hours, runs, history::now(), log::utc_offset_secs());
+        self.analyzed.insert(key.to_string(), (Instant::now(), h.clone()));
+        h
+    }
+
     fn devices_tab_body(&mut self, ui: &mut egui::Ui, p: Palette) {
         let names = self.device_names();
+        let selected_health = self.health_of(&self.selected.to_ascii_lowercase());
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(12.0, 12.0);
             for (name, battery) in &names {
@@ -462,9 +479,7 @@ impl SettingsApp {
         state.show_body_unindented(ui, |ui| {
             ui.add_space(12.0);
             let samples = self.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            let runs = self.runs.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            let hours = self.stats.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            detail_panel(ui, p, battery.as_ref(), samples, runs, hours);
+            detail_panel(ui, p, battery.as_ref(), samples, &selected_health);
         });
         state.store(ui.ctx());
 
@@ -495,8 +510,8 @@ impl SettingsApp {
         let sample_ctx = names.iter().find(|(n, _)| n.eq_ignore_ascii_case(&self.selected)).and_then(|(_, b)| b.as_ref()).map(|b| {
             let samples = self.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
             let runs = self.runs.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            let hours = self.stats.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            placeholders::Context::build(b, None, samples, runs, hours, history::now())
+            let has_stats = self.stats.get(&key).is_some_and(|v| !v.is_empty());
+            placeholders::Context::build_with(b, None, samples, runs, &selected_health, has_stats, history::now())
         });
 
         egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(12).show(ui, |ui| {
@@ -605,13 +620,17 @@ impl SettingsApp {
             section(ui, p, t().language_title, t().language_info, |ui| {
                 let current = self.settings.language;
                 let shown = if current == Language::System { format!("{} ({})", current.label(), i18n::current().label()) } else { current.label().to_string() };
-                egui::ComboBox::from_id_salt("language").selected_text(shown).width(260.0).height(400.0).show_ui(ui, |ui| {
+                let combo = egui::ComboBox::from_id_salt("language").selected_text(shown).width(260.0).height(400.0).show_ui(ui, |ui| {
                     for l in i18n::CHOICES {
                         if ui.selectable_label(l == current, l.label()).clicked() && l != current {
                             picked = Some(l);
                         }
                     }
                 });
+                // 一覧には各言語の文字で名前が並ぶので、カーソルが乗った・開いたときに予備のフォントを読み込む
+                if combo.response.hovered() || combo.inner.is_some() {
+                    apply_fonts(ui.ctx(), true);
+                }
             });
             if let Some(l) = picked {
                 self.set_language(&ctx, l);
@@ -1231,11 +1250,9 @@ fn heading_with_info(ui: &mut egui::Ui, p: Palette, title: &str, info: &str) {
 }
 
 /// カードの下に開く詳細: 減り具合のグラフと電池の健康状態
-fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, samples: &[Sample], runs: &[Run], hours: &[crate::stats::Hour]) {
+fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, samples: &[Sample], h: &health::Health) {
     let now = history::now();
     let offset = log::utc_offset_secs();
-    // 長期の統計があればそこから、なければ放電区間の記録から
-    let h = crate::stats::analyze(hours, runs, now, offset);
     let pending = h.need_days.map(|d| d as usize).unwrap_or_else(|| health::MIN_RUNS - h.runs.min(health::MIN_RUNS));
 
     egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(16).show(ui, |ui| {
@@ -1247,7 +1264,7 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
             ui.add_space(6.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width() - 12.0, 150.0), egui::Sense::hover());
             let chart = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - 18.0));
-            draw_trend(ui.painter(), chart, p, battery, samples, &h, offset);
+            draw_trend(ui.painter(), chart, p, battery, samples, h, offset);
 
             // 右: 健康状態
             let ui = &mut cols[1];
@@ -1478,15 +1495,7 @@ fn draw_daily(painter: &egui::Painter, area: egui::Rect, p: Palette, daily: &[(u
 
 fn setup_style(ctx: &egui::Context, dark: bool) {
     // 表示言語に合わせて Windows のフォントを読み込む (言語が変わったときだけ)
-    let style = i18n::style();
-    static FONT_LANG: std::sync::Mutex<Option<Language>> = std::sync::Mutex::new(None);
-    let lang = i18n::current();
-    if let Ok(mut loaded) = FONT_LANG.lock() {
-        if *loaded != Some(lang) {
-            *loaded = Some(lang);
-            ctx.set_fonts(load_fonts(style));
-        }
-    }
+    apply_fonts(ctx, false);
 
     let p = Palette::new(dark);
     ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
@@ -1517,12 +1526,27 @@ fn fallback_offset(file: &str) -> f32 {
 }
 
 /// 言語ごとのフォント: 先頭に見つかったものを優先し、2 つ目以降は他の文字 (日本語のデバイス名など) の予備にする
-fn load_fonts(style: &i18n::Style) -> egui::FontDefinitions {
+/// 読み込んだフォントの組み合わせ (言語, 予備のフォントを含むか)
+static FONT_SET: std::sync::Mutex<Option<(Language, bool)>> = std::sync::Mutex::new(None);
+
+/// 今の言語のフォントを入れる。with_extra なら予備のフォント (韓国語・中国語) も足す。一度足したら外さない
+fn apply_fonts(ctx: &egui::Context, with_extra: bool) {
+    let lang = i18n::current();
+    let Ok(mut loaded) = FONT_SET.lock() else { return };
+    let extra = with_extra || loaded.is_some_and(|(_, e)| e);
+    if *loaded != Some((lang, extra)) {
+        *loaded = Some((lang, extra));
+        ctx.set_fonts(load_fonts(i18n::style(), extra));
+    }
+}
+
+fn load_fonts(style: &i18n::Style, extra: bool) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
     let mut first = true;
     let mut order = 0;
-    for file in style.fonts {
+    let files = style.fonts.iter().chain(i18n::EXTRA_FONTS.iter().filter(|f| extra && !style.fonts.contains(f)));
+    for file in files {
         let Ok(bytes) = std::fs::read(format!(r"{windir}\Fonts\{file}")) else { continue };
         let mut data = egui::FontData::from_owned(bytes);
         // 字面の上下位置はフォントごとに違う。主フォントは言語の設定値、予備はフォントごとの値

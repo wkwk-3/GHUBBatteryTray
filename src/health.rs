@@ -92,7 +92,7 @@ pub enum Basis {
     Cycles,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Health {
     pub runs: usize,
     /// このアプリで記録してからの充電サイクル数 (放電した % の合計 / 100)

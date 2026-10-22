@@ -231,8 +231,11 @@ impl Recorder {
     pub fn observe(&mut self, list: &[Battery], t: u64) {
         for b in list.iter().filter(|b| b.connected && !b.asleep) {
             let key = b.device_name.to_ascii_lowercase();
-            if self.seeded.insert(key.clone()) && !path_in(&self.dir, &key).exists() {
-                self.seed(&key, &crate::history::path());
+            if self.seeded.insert(key.clone()) {
+                if !path_in(&self.dir, &key).exists() {
+                    self.seed(&key, &crate::history::path());
+                }
+                log_summary(&path_in(&self.dir, &key), &key, t);
             }
             self.step(&key, Obs { t, percent: b.percentage, charging: b.charging }, b.power_mw.filter(|_| !b.charging));
             if t >= self.flushed_at.get(&key).copied().unwrap_or(0) + FLUSH_SECS {
@@ -319,6 +322,33 @@ impl Recorder {
             self.flush(&k, t);
         }
     }
+}
+
+/// 統計の概要をログに書く (問い合わせ時に、どれだけ記録があって何を推定しているか分かるように)
+fn log_summary(path: &Path, key: &str, now: u64) {
+    let hours = load(path);
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let Some(first) = hours.first() else {
+        crate::log::info("I045", format!("統計: {key} 記録なし"));
+        return;
+    };
+    let days = now.saturating_sub(first.hour as u64 * 3600) as f64 / DAY as f64;
+    let h = analyze(&hours, &[], now, crate::log::utc_offset_secs());
+    let opt = |v: Option<f64>, unit: &str| v.map(|v| format!("{v:.2}{unit}")).unwrap_or_else(|| "-".into());
+    crate::log::info("I042", format!(
+        "統計: {key} {} 件 ({days:.1} 日分, {bytes} バイト) / 推定容量 {} / 使用時間 {} / 容量比 {} / 1 日の消費 {} / 充電サイクル {:.1} / 劣化の目安 {} ({:?})",
+        hours.len(),
+        opt(h.capacity_mwh, " mWh"),
+        opt(h.full_runtime_h, " 時間"),
+        opt(h.health.map(|v| v * 100.0), "%"),
+        opt(h.daily_drain, "%"),
+        h.cycles,
+        h.degrade_at.map(|(t, _)| {
+            let (y, m, d) = crate::health::ymd(t);
+            format!("{y}-{m:02}-{d:02}")
+        }).unwrap_or_else(|| "-".into()),
+        h.degrade_at.map(|(_, b)| b),
+    ));
 }
 
 fn write(path: &Path, h: &Hour) {

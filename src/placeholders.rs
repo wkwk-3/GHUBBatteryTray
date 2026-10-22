@@ -133,13 +133,18 @@ pub struct Context {
 
 impl Context {
     pub fn build(b: &Battery, threshold: Option<i32>, samples: &[Sample], runs: &[Run], hours: &[crate::stats::Hour], now: u64) -> Context {
+        let h = crate::stats::analyze(hours, runs, now, crate::log::utc_offset_secs());
+        Context::build_with(b, threshold, samples, runs, &h, !hours.is_empty(), now)
+    }
+
+    /// 統計の計算結果 (h) を渡して作る (設定画面は計算結果を使い回す)
+    pub fn build_with(b: &Battery, threshold: Option<i32>, samples: &[Sample], runs: &[Run], h: &health::Health, has_stats: bool, now: u64) -> Context {
         let trend = history::trend(samples, now, b);
         let offset = crate::log::utc_offset_secs();
-        let h = crate::stats::analyze(hours, runs, now, offset);
         let connected = b.connected && !b.asleep;
         // 0% になる時刻: 使い方の統計があればそれに沿って、なければ今の減り方で
         let empty_at = if connected && !b.charging {
-            crate::stats::forecast(&h, now, b.percentage as f64, trend.drain_per_hour, offset)
+            crate::stats::forecast(h, now, b.percentage as f64, trend.drain_per_hour, offset)
                 .and_then(|p| crate::stats::empty_at(&p))
                 .or_else(|| trend.empty_at(now, b.percentage))
         } else {
@@ -179,7 +184,7 @@ impl Context {
             time: now,
             since_secs,
             health: h.health,
-            cycles: (!runs.is_empty() || !hours.is_empty()).then_some(h.cycles),
+            cycles: (!runs.is_empty() || has_stats).then_some(h.cycles),
             replace_at: h.replace_at.map(|(t, _)| t),
             pace,
             streak_secs,

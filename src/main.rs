@@ -393,10 +393,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "3.1.0");
+        assert_eq!(crate::updater::CURRENT, "3.1.1");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v3.1.1").is_newer() && r("v3.2.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v3.1.0").is_newer() && !r("v3.1").is_newer() && !r("v3.0.0").is_newer() && !r("nightly").is_newer());
+        assert!(r("v3.1.2").is_newer() && r("v3.2.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v3.1.1").is_newer() && !r("v3.1.0").is_newer() && !r("v3.0.0").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -777,5 +777,27 @@ SHA256: {}", hash.to_uppercase()),
         assert_eq!(h.need_days, Some(23));
         // 寿命の目安は充電ペースから
         assert_eq!(h.degrade_at.unwrap().1, crate::health::Basis::Cycles);
+    }
+
+    #[test]
+    fn hidpp_notices_from_real_device() {
+        use crate::hidpp::{Notice, parse_notice};
+        // PRO 2 LIGHTSPEED (受信機の番号 1、統合バッテリー 0x1004 は機能番号 7) で実際に届いたデータ
+        let battery = [(1u8, 0x1004u16, 7u8)];
+        let charging = [0x11, 0x01, 0x07, 0x00, 0x25, 0x04, 0x01, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(parse_notice(&charging, &battery), Some(Notice::Battery(1, 37, true, false)));
+        let discharging = [0x11, 0x01, 0x07, 0x00, 0x30, 0x04, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(parse_notice(&discharging, &battery), Some(Notice::Battery(1, 48, false, false)));
+        let full = [0x11, 0x01, 0x07, 0x00, 0x64, 0x08, 0x03, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(parse_notice(&full, &battery), Some(Notice::Battery(1, 100, true, true)));
+        // マウスを動かしたときの別の機能 (0x10) の通知は無視する
+        let other = [0x11, 0x01, 0x10, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(parse_notice(&other, &battery), None);
+        // 取得スレッドへの応答 (software id 付き) は通知ではない
+        let reply = [0x11, 0x01, 0x07, 0x1B, 0x25, 0x04, 0x01, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(parse_notice(&reply, &battery), None);
+        // 受信機の接続通知 (短い報告): bit6 が立っていれば切断
+        assert_eq!(parse_notice(&[0x10, 0x01, 0x41, 0x04, 0x01, 0x8A, 0x40], &battery), Some(Notice::Link(1, true)));
+        assert_eq!(parse_notice(&[0x10, 0x01, 0x41, 0x04, 0x41, 0x8A, 0x40], &battery), Some(Notice::Link(1, false)));
     }
 }

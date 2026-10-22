@@ -2,7 +2,7 @@ use super::{Style, Texts};
 
 pub static T: Texts = Texts {
     style: Style {
-        fonts: &["msyh.ttc", "YuGothM.ttc", "malgun.ttf"],
+        fonts: &["msyh.ttc", "YuGothM.ttc"],
         y_offset: 0.1,
         body: 14.0,
         rule_cols: [50.0, 110.0, 100.0, 50.0],
