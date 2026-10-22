@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod fullscreen;
+mod envinfo;
 mod ghub;
 mod hidpp;
 mod health;
@@ -21,6 +22,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::core::HSTRING;
 
 fn main() {
+    log::install_panic_hook();
     let settings_mode = std::env::args().any(|a| a == "--settings");
 
     // 二重起動しない (設定フォルダーごと。テスト用に別フォルダーで動かすときはぶつからない)
@@ -40,6 +42,9 @@ fn main() {
         }
         tries -= 1;
         if tries == 0 {
+            if after_update {
+                log::warn("更新前のアプリが終了しないため、起動を中止しました");
+            }
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -71,9 +76,8 @@ fn integrity_ok() -> bool {
             log::error(format!("exe のハッシュ値が GitHub の {tag} と一致しません。起動を中止します (GitHub: {expected} / この exe: {actual})"));
             use windows::Win32::UI::WindowsAndMessaging::*;
             let text = HSTRING::from(format!(
-                "この GHUBBatteryTray.exe (v{}) は、GitHub で公開されている {tag} のファイルと一致しません。\n\n\
-                 改ざんや破損の可能性があるため、起動を中止しました。\n\
-                 正規の exe をダウンロードし直してください。\n\n\
+                "この GHUBBatteryTray.exe (v{}) は、GitHub で公開されている {tag} のファイルと一致しないため、起動を中止しました。\n\
+                 リリースページから再ダウンロードしてください。\n\n\
                  GitHub: {expected}\nこの exe: {actual}\n\n\
                  リリースページを開きますか？",
                 updater::CURRENT
@@ -389,10 +393,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "2.4.0");
+        assert_eq!(crate::updater::CURRENT, "2.5.0");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v2.4.1").is_newer() && r("v2.5.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v2.4.0").is_newer() && !r("v2.4").is_newer() && !r("v2.3.0").is_newer() && !r("nightly").is_newer());
+        assert!(r("v2.5.1").is_newer() && r("v2.6.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v2.5.0").is_newer() && !r("v2.5").is_newer() && !r("v2.4.0").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -489,7 +493,7 @@ SHA256: {}", hash.to_uppercase()),
         assert_eq!(combine(&[n("PRO 2", "残り 20%", 2)]), ("PRO 2".into(), "残り 20%".into(), 2));
         // 複数はまとめて、アイコンは一番重いもの
         let (title, text, kind) = combine(&[n("PRO 2", "残り 50%", 1), n("PRO 2", "残り 20%", 3), n("Headset", "充電が完了しました", 1)]);
-        assert_eq!(title, "待っていた通知 (3 件)");
+        assert_eq!(title, "保留中の通知 (3 件)");
         assert_eq!(text, "・PRO 2: 残り 50%
 ・PRO 2: 残り 20%
 ・Headset: 充電が完了しました");
@@ -532,11 +536,11 @@ SHA256: {}", hash.to_uppercase()),
         let t = "{name}|{battery}|{now}|{remain}|{empty_at}|{rate}|{power}|{source}|{time}|{since}|{health}|{cycles}|{replace}|{bar}|{pace}|{streak}|{rn}|{unknown}|{";
         assert_eq!(
             expand(t, &ctx),
-            "PRO 2|20|18|約3時間|21:40ごろ|-5.2%/時|14.7 mW|直接通信|18:00|9時間|97%|7.9回|2027年6月ごろ|■■□□□□□□□□|いつもより速い|3日|\r\n|{unknown}|{"
+            "PRO 2|20|18|約3時間|21:40ごろ|-5.2%/時|14.7 mW|直接通信|18:00|9時間|97%|7.9回|2027年6月ごろ|■■□□□□□□□□|平均より速い|3日|\r\n|{unknown}|{"
         );
-        // 分からない値は「—」
+        // 分からない値は「不明」
         let empty = Context { name: "X".into(), time: now, utc_offset: 9 * 3600, ..Default::default() };
-        assert_eq!(expand("{now}/{remain}/{pace}/{health}", &empty), "—/—/—/—");
+        assert_eq!(expand("{now}/{remain}/{pace}/{health}", &empty), "不明/不明/不明/不明");
     }
 
     #[test]

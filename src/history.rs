@@ -68,9 +68,8 @@ impl Recorder {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = f.write_all(lines.as_bytes());
-        }
+        let written = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| f.write_all(lines.as_bytes()));
+        crate::log::problem("history", written.err().map(|e| format!("history.csv に書き込めません: {e}")), "history.csv に書き込めるようになりました");
         if !started_charging.is_empty() {
             let all = load_all(path);
             for device in started_charging {
@@ -78,7 +77,7 @@ impl Recorder {
                 if let Some(run) = crate::health::last_run(samples, self.last_power.get(&device).copied()) {
                     crate::health::append(&crate::health::path_beside(path), &device, &run);
                     crate::log::info(format!(
-                        "放電の記録を追加: {device} {}% → {}% / {:.1} 時間 (満充電での持ち 約{:.0} 時間)",
+                        "放電の記録を追加: {device} {}% → {}% / {:.1} 時間 (満充電時の使用可能時間 約{:.0} 時間)",
                         run.start_pct, run.end_pct, run.hours, run.full_runtime_h()
                     ));
                 }
@@ -98,7 +97,9 @@ fn compact(path: &Path, t: u64) {
         .filter(|l| l.split(',').next().and_then(|v| v.parse::<u64>().ok()).is_some_and(|lt| lt + KEEP_SECS >= t))
         .map(|l| format!("{l}\n"))
         .collect();
-    let _ = std::fs::write(path, kept);
+    if let Err(e) = std::fs::write(path, kept) {
+        crate::log::warn(format!("history.csv の古い行を消せませんでした: {e}"));
+    }
 }
 
 /// デバイスごとの履歴 (古い順)

@@ -205,10 +205,26 @@ pub fn modified() -> Option<std::time::SystemTime> {
 
 impl Settings {
     pub fn load() -> Settings {
-        let mut s: Settings = std::fs::read_to_string(path())
-            .ok()
-            .and_then(|t| serde_json::from_str(t.trim_start_matches('\u{feff}')).ok())
-            .unwrap_or_default();
+        let mut s: Settings = match std::fs::read_to_string(path()) {
+            Ok(t) => match serde_json::from_str(t.trim_start_matches('\u{feff}')) {
+                Ok(s) => {
+                    crate::log::problem("settings", None, "設定ファイルを読み込めるようになりました");
+                    s
+                }
+                Err(e) => {
+                    // このまま保存すると初期設定で上書きされるので、壊れた内容を残しておく
+                    let kept = std::fs::copy(path(), path().with_extension("json.broken")).is_ok();
+                    let note = if kept { " (元の内容は settings.json.broken に保存)" } else { "" };
+                    crate::log::problem("settings", Some(format!("設定ファイルを読み込めないため初期設定を使います: {e}{note}")), "");
+                    Settings::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+            Err(e) => {
+                crate::log::problem("settings", Some(format!("設定ファイルを開けないため初期設定を使います: {e}")), "");
+                Settings::default()
+            }
+        };
 
         if s.tray_display_device.is_empty() && !s.selected_device.is_empty() {
             s.tray_display_device = s.selected_device.clone();

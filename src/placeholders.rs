@@ -21,10 +21,10 @@ pub const DEFS: &[Def] = &[
     Def { key: "empty_at", desc: "0% になる予測時刻", sample: "21:40ごろ" },
     Def { key: "health", desc: "容量 (記録開始時比)", sample: "97%" },
     Def { key: "name", desc: "デバイス名", sample: "PRO 2 LIGHTSPEED" },
-    Def { key: "now", desc: "今の残量 (%)", sample: "18" },
-    Def { key: "pace", desc: "いつもと比べた減り方", sample: "いつもより速い" },
+    Def { key: "now", desc: "現在の残量 (%)", sample: "18" },
+    Def { key: "pace", desc: "平均との比較 (消費ペース)", sample: "平均より速い" },
     Def { key: "power", desc: "放電量", sample: "14.7 mW" },
-    Def { key: "rate", desc: "今の減るペース", sample: "-5.3%/時" },
+    Def { key: "rate", desc: "現在の消費ペース", sample: "-5.3%/時" },
     Def { key: "remain", desc: "残り時間 (G HUB 起動時)", sample: "約3時間" },
     Def { key: "replace", desc: "買い替えの目安", sample: "2027年6月ごろ" },
     Def { key: "rn", desc: "改行", sample: "(改行)" },
@@ -35,7 +35,7 @@ pub const DEFS: &[Def] = &[
 ];
 
 /// 値が分からないとき
-const UNKNOWN: &str = "—";
+const UNKNOWN: &str = "不明";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pace {
@@ -139,9 +139,9 @@ impl Context {
                 .unwrap_or_else(unknown),
             "bar" => self.now_pct.map(bar_text).unwrap_or_else(unknown),
             "pace" => match self.pace {
-                Some(Pace::Faster) => "いつもより速い".into(),
-                Some(Pace::Usual) => "いつも通り".into(),
-                Some(Pace::Slower) => "いつもより遅い".into(),
+                Some(Pace::Faster) => "平均より速い".into(),
+                Some(Pace::Usual) => "平均的".into(),
+                Some(Pace::Slower) => "平均より遅い".into(),
                 None => unknown(),
             },
             "streak" => self.streak_secs.map(duration_text).unwrap_or_else(unknown),

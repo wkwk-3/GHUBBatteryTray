@@ -43,15 +43,15 @@ impl Battery {
         }
         let mut s = format!("{}%", self.percentage);
         if self.asleep {
-            s += "  ·  スリープ中";
+            s += " / スリープ中";
         } else if self.charging {
-            s += if self.fully_charged { "  ·  充電完了" } else { "  ·  充電中" };
+            s += if self.fully_charged { " / 充電完了" } else { " / 充電中" };
         } else if let Some(h) = self.remaining_hours {
-            s += &if h >= 1.0 { format!("  ·  残り約{:.0}時間", h) } else { format!("  ·  残り約{:.0}分", h * 60.0) };
+            s += &if h >= 1.0 { format!(" / 残り約{:.0}時間", h) } else { format!(" / 残り約{:.0}分", h * 60.0) };
         }
         if !self.charging && !self.asleep {
             if let Some(mw) = self.power_mw {
-                s += &format!("  ·  放電量 {mw:.1} mW");
+                s += &format!(" / 放電量 {mw:.1} mW");
             }
         }
         s
@@ -200,7 +200,17 @@ pub fn read_settings_db() -> Result<Vec<Battery>> {
 
 /// G HUB API から 1 回だけ取得する
 pub fn fetch_agent() -> Option<Vec<Battery>> {
-    let mut agent = Agent::connect().ok()?;
-    agent.refresh_all().ok()?;
-    Some(agent.batteries())
+    let result = Agent::connect().and_then(|mut agent| agent.refresh_all().map(|_| agent.batteries()));
+    match result {
+        Ok(list) => {
+            crate::log::problem("ghub", None, "G HUB API に接続しました");
+            crate::log::debug(format!("G HUB API: {} 台", list.len()));
+            Some(list)
+        }
+        Err(e) => {
+            // G HUB を入れていない環境では毎回失敗するので、内容が変わったときだけ書く
+            crate::log::problem("ghub", Some(format!("G HUB API を使えません: {e}")), "");
+            None
+        }
+    }
 }

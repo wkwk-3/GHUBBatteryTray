@@ -155,11 +155,15 @@ pub struct Reader {
 
 impl Reader {
     pub fn new() -> Self {
-        Reader { api: {
-            #[allow(deprecated)]
-            let api = HidApi::new_without_enumerate().ok();
-            api
-        }, known: Vec::new(), last_scan: None }
+        #[allow(deprecated)]
+        let api = match HidApi::new_without_enumerate() {
+            Ok(api) => Some(api),
+            Err(e) => {
+                crate::log::error(format!("HID の初期化に失敗しました。直接通信は使えません: {e}"));
+                None
+            }
+        };
+        Reader { api, known: Vec::new(), last_scan: None }
     }
 
     /// 接続中の Logitech デバイスのバッテリーを読む
@@ -173,7 +177,16 @@ impl Reader {
         let mut list = Vec::new();
         let mut lost = false;
         for k in &mut self.known {
-            let reading = api.open_path(&k.path).ok().and_then(|dev| Channel { dev: &dev, index: k.index }.battery(k.feature));
+            let reading = match api.open_path(&k.path) {
+                Ok(dev) => Channel { dev: &dev, index: k.index }.battery(k.feature),
+                Err(e) => {
+                    crate::log::debug(format!("HID: {} を開けません: {e}", k.name));
+                    None
+                }
+            };
+            if reading.is_none() {
+                crate::log::debug(format!("HID: {} から応答がありません", k.name));
+            }
             match reading {
                 Some((percentage, charging, full)) => {
                     let b = Battery {
@@ -215,9 +228,11 @@ impl Reader {
         // 前回の値は持ち越す (再スキャンで見つからなくてもスリープ表示に使う)
         let previous: Vec<Known> = std::mem::take(&mut self.known);
         let Some(api) = self.api.as_mut() else { return };
-        if api.reset_devices().is_err() || api.add_devices(VENDOR_LOGITECH, 0).is_err() {
+        if let Err(e) = api.reset_devices().and_then(|_| api.add_devices(VENDOR_LOGITECH, 0)) {
+            crate::log::problem("hid_scan", Some(format!("HID デバイスの一覧を取得できません: {e}")), "");
             return;
         }
+        crate::log::problem("hid_scan", None, "HID デバイスの一覧を取得できるようになりました");
 
         let paths: Vec<_> = api
             .device_list()
@@ -226,7 +241,13 @@ impl Reader {
             .collect();
 
         for path in paths {
-            let Ok(dev) = api.open_path(&path) else { continue };
+            let dev = match api.open_path(&path) {
+                Ok(dev) => dev,
+                Err(e) => {
+                    crate::log::debug(format!("HID: {} を開けません: {e}", path.to_string_lossy()));
+                    continue;
+                }
+            };
 
             // 直結デバイスは 0xFF、受信機ならペアリング番号 1〜6
             let direct = Channel { dev: &dev, index: 0xFF };
@@ -237,13 +258,30 @@ impl Reader {
                 if !ch.ping() {
                     continue;
                 }
-                let Some(feature) = ch.battery_feature() else { continue };
+                let Some(feature) = ch.battery_feature() else {
+                    crate::log::debug(format!("HID: 番号 {index} はバッテリー機能に対応していません"));
+                    continue;
+                };
                 let name = ch.name().unwrap_or_else(|| format!("Logitech device {index}"));
                 if self.known.iter().any(|k| k.name == name) {
                     continue;
                 }
                 let last = previous.iter().find(|k| k.name == name).and_then(|k| k.last.clone());
                 self.known.push(Known { path: path.clone(), index, name, feature, last });
+            }
+        }
+
+        // 見つかった顔ぶれが変わったときだけ書く
+        static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let found = if self.known.is_empty() {
+            "なし".to_string()
+        } else {
+            self.known.iter().map(|k| format!("{} (番号 {}, 機能 0x{:04X})", k.name, k.index, k.feature.0)).collect::<Vec<_>>().join(", ")
+        };
+        if let Ok(mut last) = LAST.lock() {
+            if last.as_deref() != Some(found.as_str()) {
+                crate::log::info(format!("HID 直接通信で見つかったデバイス: {found}"));
+                *last = Some(found);
             }
         }
     }

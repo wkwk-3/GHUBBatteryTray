@@ -90,7 +90,7 @@ pub fn combine(items: &[Pending]) -> (String, String, i32) {
     }
     // アイコンは一番重いもの (エラー > 警告 > 情報 > なし)
     let kind = items.iter().map(|p| p.kind).max().unwrap_or(0);
-    (format!("待っていた通知 ({} 件)", items.len()), text, kind)
+    (format!("保留中の通知 ({} 件)", items.len()), text, kind)
 }
 
 static mut APP: Option<App> = None;
@@ -133,6 +133,7 @@ pub fn run() {
         update_icon();
 
         log::info(format!("アプリを開始しました (バージョン {})", env!("CARGO_PKG_VERSION")));
+        crate::envinfo::log_startup(&app().settings);
         updater::cleanup_old();
         if std::env::args().any(|a| a == "--after-update") {
             notify("GHUB Battery", &format!("v{} に更新しました", updater::CURRENT), 1);
@@ -178,7 +179,7 @@ fn log_changes(prev: &[Battery], list: &[Battery]) {
         }
     }
     for p in prev.iter().filter(|p| !list.iter().any(|b| b.device_name == p.device_name)) {
-        log::info(format!("デバイスが見つからなくなりました: {}", p.label()));
+        log::info(format!("デバイスが切断されました: {}", p.label()));
     }
     if list.is_empty() && !prev.is_empty() {
         log::warn("バッテリー情報を取得できませんでした (直接通信・G HUB API・settings.db すべて)");
@@ -244,6 +245,10 @@ fn worker(hwnd: isize, shared: Arc<Mutex<Shared>>, refresh: Arc<AtomicBool>) {
     let mut prev: Vec<Battery> = Vec::new();
     loop {
         let list = sources::collect(&mut reader);
+        if log::debug_enabled() {
+            let summary: Vec<String> = list.iter().map(|b| format!("{} {}%{}{} [{}]", b.label(), b.percentage, if b.charging { " 充電中" } else { "" }, if b.asleep { " スリープ" } else { "" }, b.source.map(|s| s.label()).unwrap_or("?"))).collect();
+            log::debug(format!("取得結果: {}", if summary.is_empty() { "なし".into() } else { summary.join(", ") }));
+        }
         recorder.record(&list);
         log_changes(&prev, &list);
         prev = list.clone();
@@ -279,7 +284,9 @@ fn add_tray_icon(uid: u32) {
     nid.uCallbackMessage = WM_APP_TRAY;
     copy_wstr(&mut nid.szTip, "GHUB Battery");
     unsafe {
-        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+        if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
+            log::error(format!("トレイアイコンを登録できませんでした (番号 {uid}): {}", windows::core::Error::from_thread()));
+        }
     }
 }
 
@@ -398,7 +405,7 @@ fn flush_pending() {
     }
     let items = std::mem::take(&mut a.pending);
     let (title, text, kind) = combine(&items);
-    log::info(format!("フルスクリーンが終わったので、保留していた通知を表示します ({} 件)", items.len()));
+    log::info(format!("フルスクリーン終了。保留中の通知を表示 ({} 件)", items.len()));
     show_balloon(&title, &text, kind);
     app().update_balloon = items.iter().any(|p| p.is_update);
 }
@@ -444,7 +451,10 @@ fn check_notifications() {
             a.full_notified.remove(&b.device_name);
         }
 
-        let Some(rules) = a.settings.rules(&b.device_name) else { continue };
+        let Some(rules) = a.settings.rules(&b.device_name) else {
+            log::debug(format!("通知ルールなし: {} ({})", b.label(), b.device_name));
+            continue;
+        };
         let mut rules = rules.clone();
         rules.sort_by_key(|r| -r.battery);
 
@@ -452,7 +462,9 @@ fn check_notifications() {
             let key = (b.device_name.clone(), rule.battery);
             // 充電中は残量低下を通知しない
             if !b.charging && b.percentage <= rule.battery {
-                if a.notified.insert(key) {
+                if !a.notified.insert(key) {
+                    log::debug(format!("通知済みのため送りません: {} {}% (しきい値 {}%)", b.label(), b.percentage, rule.battery));
+                } else {
                     let text = crate::placeholders::expand(&rule.message, &placeholder_context(b, rule.battery));
                     notify(b.label(), &text, rule.balloon_tip_icon);
                     webhook::send_if_enabled(&a.settings, webhook::Message { title: b.label().into(), text, device: b.device_name.clone(), battery: b.percentage, event: "low_battery" });
@@ -577,7 +589,9 @@ fn update_settings(change: impl FnOnce(&mut Settings)) {
     let a = app();
     a.settings = Settings::load();
     change(&mut a.settings);
-    let _ = a.settings.save();
+    if let Err(e) = a.settings.save() {
+        log::error(format!("設定の保存に失敗しました: {e}"));
+    }
     a.settings_time = settings::modified();
 }
 
@@ -641,7 +655,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_APP_UPDATE_FOUND => {
                 if let Some(r) = updater::State::load().available() {
-                    notify_ex("GHUB Battery の更新があります", &format!("{} が出ています。クリックすると設定から更新できます", r.tag), 1, true);
+                    notify_ex("GHUB Battery の更新があります", &format!("{} を公開しました。クリックして更新できます", r.tag), 1, true);
                 }
                 LRESULT(0)
             }

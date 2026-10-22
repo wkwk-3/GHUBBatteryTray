@@ -228,7 +228,9 @@ impl SettingsApp {
         self.settings.theme = theme;
         let mut on_disk = Settings::load();
         on_disk.theme = theme;
-        let _ = on_disk.save();
+        if let Err(e) = on_disk.save() {
+            log::error(format!("設定の保存に失敗しました: {e}"));
+        }
         notify_tray();
         self.dark = theme.is_dark();
         setup_style(ctx, self.dark);
@@ -366,6 +368,13 @@ impl eframe::App for SettingsApp {
                             self.refresh(&ctx);
                         }
                     }
+                    if folder_button(ui, p).on_hover_text("ログフォルダーを開く").clicked() {
+                        let _ = std::fs::create_dir_all(log::dir());
+                        let _ = std::process::Command::new("explorer.exe").arg(log::dir()).spawn();
+                    }
+                    if discord_button(ui, p).on_hover_text("Discord サーバーに参加する (ブラウザーで開きます)").clicked() {
+                        let _ = std::process::Command::new("explorer.exe").arg(DISCORD_INVITE).spawn();
+                    }
                     ui.label(RichText::new(&self.status).color(p.sub));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(egui::Button::new("閉じる").min_size(Vec2::new(96.0, 34.0))).clicked() {
@@ -433,13 +442,13 @@ impl SettingsApp {
 
         let selected_label = names.iter().find(|(n, _)| n == &self.selected).map(label).unwrap_or(&self.selected).to_string();
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("通知設定  —  {selected_label}")).size(18.0).strong().color(p.text));
+            ui.label(RichText::new(format!("通知設定：{selected_label}")).size(18.0).strong().color(p.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.checkbox(&mut self.settings.notify_full_charge, "充電完了通知").changed() {
                     self.dirty = true;
                 }
                 let mut tray = self.settings.is_tray(&self.selected);
-                if ui.checkbox(&mut tray, "アイコン表示").on_hover_text("タスクトレイにこのデバイスのアイコンを表示します (デバイスごとに別のアイコン)").changed() {
+                if ui.checkbox(&mut tray, "アイコン表示").on_hover_text("タスクトレイにアイコンを表示").changed() {
                     let selected = self.selected.clone();
                     self.settings.set_tray(&selected, tray);
                     self.dirty = true;
@@ -474,7 +483,7 @@ impl SettingsApp {
             ui,
             p,
             "Webhook 通知",
-            "残量低下・充電完了の通知を Discord / Slack などにも送ります。\nフルスクリーン中も待たずにすぐ送ります。\n「保存」で反映されます。",
+            "残量低下・充電完了の通知を Discord や Slack にも送信します。",
             |ui| {
                 if ui.checkbox(&mut self.settings.webhook_enabled, "Webhook に送信する").changed() {
                     self.dirty = true;
@@ -510,9 +519,9 @@ impl SettingsApp {
                             }
                         });
                     let help = match self.settings.webhook_format {
-                        WebhookFormat::Discord => "Discord: チャンネル設定 → 連携サービス → ウェブフック で URL を作成できます。",
+                        WebhookFormat::Discord => "Discord: チャンネル設定の「連携サービス」>「ウェブフック」で URL を作成できます。",
                         WebhookFormat::Slack => "Slack: Incoming Webhooks アプリで URL を作成できます。",
-                        WebhookFormat::Json => "汎用 JSON: {\"title\", \"message\", \"device\", \"battery\", \"event\"} を POST します (Home Assistant / n8n など)。",
+                        WebhookFormat::Json => "汎用 JSON: {\"title\", \"message\", \"device\", \"battery\", \"event\"} を JSON 形式で POST します。",
                     };
                     info_icon(ui, p, help);
                 });
@@ -526,7 +535,7 @@ impl SettingsApp {
                         let format = self.settings.webhook_format;
                         let ctx = ui.ctx().clone();
                         std::thread::spawn(move || {
-                            let m = webhook::Message { title: "GHUB Battery".into(), text: "テスト送信です".into(), device: "test".into(), battery: 50, event: "test" };
+                            let m = webhook::Message { title: "GHUB Battery".into(), text: "GHUB Battery からのテスト通知".into(), device: "test".into(), battery: 50, event: "test" };
                             let _ = tx.send(webhook::send(&url, format, &m));
                             ctx.request_repaint();
                         });
@@ -557,7 +566,7 @@ impl SettingsApp {
     /// 歯車ボタンで開く設定: アイコン表示 / 通知 / Webhook / 起動 / アップデート / 残量の色
     fn app_tab(&mut self, ui: &mut egui::Ui, p: Palette) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            section(ui, p, "アイコン表示", "タスクトレイにアイコンを表示するデバイスです。デバイスごとに別のアイコンが表示されます。\n「保存」で反映されます。", |ui| {
+            section(ui, p, "アイコン表示", "タスクトレイにアイコンを表示するデバイスです。デバイスごとに別のアイコンが表示されます。", |ui| {
                 let names = self.device_names();
                 if names.is_empty() {
                     ui.label(RichText::new("デバイスが見つかりません").color(p.sub));
@@ -579,10 +588,10 @@ impl SettingsApp {
                 ui,
                 p,
                 "通知",
-                "ゲームや動画などがフルスクリーンで表示されている間は、Windows の通知を出さずにためておき、フルスクリーンが終わったらまとめて表示します。\nWebhook はフルスクリーン中も待たずにすぐ送ります。\n「保存」で反映されます。",
+                "フルスクリーン表示中は通知を保留し、終了後にまとめて表示します。\nWebhook は保留せずに送信します。",
                 |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("フルスクリーン中は通知を待つ").color(p.text));
+                        ui.label(RichText::new("フルスクリーン中は通知を保留").color(p.text));
                         ui.add_space(8.0);
                         if toggle_switch(ui, &mut self.settings.defer_in_fullscreen).changed() {
                             self.dirty = true;
@@ -594,7 +603,7 @@ impl SettingsApp {
 
             self.webhook_section(ui, p);
 
-            section(ui, p, "起動", "オンにすると、Windows にサインインしたときに自動で起動します。\n切り替えるとすぐに反映されます (「保存」は不要)。", |ui| {
+            section(ui, p, "起動", "Windows へのサインイン時に自動で起動します。変更は即時反映されます。", |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Windows 起動時に開始").color(p.text));
                     ui.add_space(8.0);
@@ -612,7 +621,7 @@ impl SettingsApp {
                 ui,
                 p,
                 "残量の色",
-                "残量に応じた、タスクトレイのアイコンと画面の色です。上から順に「この % 以下ならこの色」で、最後の段階は 100% までです。\n色の四角を押すと色を選べます。画面にはすぐ反映され、タスクトレイには「保存」で反映されます。",
+                "残量に応じたタスクトレイのアイコンと画面の色です。上から順に「この % 以下ならこの色」で、最後の段階は 100% までです。\n色見本をクリックして変更できます。",
                 |ui| {
                     let colors = &mut self.settings.level_colors;
 
@@ -706,7 +715,7 @@ impl SettingsApp {
             ui,
             p,
             "アップデート",
-            "GitHub のリリースで新しいバージョンを確認します。自動確認はアプリの起動時と 1 日 1 回です。\n「更新」を押すと、新しいバージョンをダウンロードして入れ替え、アプリを再起動します。設定はそのまま引き継がれます。",
+            "起動時と 1 日 1 回、GitHub で新しいバージョンを確認します。更新後は自動で再起動します。",
             |ui| {
                 let busy = self.update_job.is_some();
                 ui.horizontal(|ui| {
@@ -741,7 +750,7 @@ impl SettingsApp {
                     egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, ACCENT)).corner_radius(6).inner_margin(12).show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{} が出ています", release.tag)).strong().color(p.text));
+                            ui.label(RichText::new(format!("新しいバージョン: {}", release.tag)).strong().color(p.text));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let button = egui::Button::new(RichText::new("更新").color(Color32::WHITE).strong()).fill(ACCENT).min_size(Vec2::new(96.0, CONTROL_H));
                                 if ui.add_enabled(!busy, button).clicked() {
@@ -847,6 +856,42 @@ fn gear_button(ui: &mut egui::Ui, p: Palette, active: bool) -> egui::Response {
     painter.circle_filled(c, 6.5, color);
     painter.circle_filled(c, 2.6, bg);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+const DISCORD_INVITE: &str = "https://discord.gg/V7vdTBB8m8";
+
+/// フッターの小さなアイコンボタンの土台
+fn icon_button(ui: &mut egui::Ui) -> (egui::Rect, egui::Response) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    ui.painter().rect_filled(rect, CornerRadius::same(6), visuals.bg_fill);
+    (rect, response.on_hover_cursor(egui::CursorIcon::PointingHand))
+}
+
+/// フォルダーの形
+fn folder_button(ui: &mut egui::Ui, p: Palette) -> egui::Response {
+    let (rect, response) = icon_button(ui);
+    let color = if response.hovered() { ACCENT } else { p.text };
+    let c = rect.center();
+    let painter = ui.painter();
+    // つまみ + 本体
+    painter.rect_filled(egui::Rect::from_min_size(c + Vec2::new(-8.0, -6.5), Vec2::new(7.0, 4.0)), CornerRadius::same(1), color);
+    painter.rect_filled(egui::Rect::from_min_size(c + Vec2::new(-8.0, -4.0), Vec2::new(16.0, 11.0)), CornerRadius::same(2), color);
+    response
+}
+
+/// Discord のロゴ風 (ブランド色の丸に顔)
+fn discord_button(ui: &mut egui::Ui, _p: Palette) -> egui::Response {
+    let (rect, response) = icon_button(ui);
+    let blurple = Color32::from_rgb(0x58, 0x65, 0xF2);
+    let c = rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(c, if response.hovered() { 11.0 } else { 10.0 }, blurple);
+    // 顔 (横長の丸 2 つを重ねてコントローラー形に) + 目
+    painter.rect_filled(egui::Rect::from_center_size(c + Vec2::new(0.0, 0.5), Vec2::new(12.0, 8.0)), CornerRadius::same(4), Color32::WHITE);
+    painter.circle_filled(c + Vec2::new(-2.6, 0.5), 1.4, blurple);
+    painter.circle_filled(c + Vec2::new(2.6, 0.5), 1.4, blurple);
+    response
 }
 
 fn format_label(f: WebhookFormat) -> &'static str {
@@ -1006,7 +1051,7 @@ fn message_field(ui: &mut egui::Ui, p: Palette, row: usize, rule: &mut Rule, wid
                     let sample = match d.key {
                         "battery" => rule.battery.to_string(),
                         "rn" => d.sample.to_string(),
-                        _ => sample_ctx.and_then(|c| c.value(d.key)).filter(|v| v != "—").unwrap_or_else(|| d.sample.to_string()),
+                        _ => sample_ctx.and_then(|c| c.value(d.key)).filter(|v| v != "不明").unwrap_or_else(|| d.sample.to_string()),
                     };
                     ui.painter().text(egui::pos2(rect.right() - 8.0, y), egui::Align2::RIGHT_CENTER, format!("例: {sample}"), egui::FontId::proportional(12.0), p.sub);
                     if selected && moved != 0 {
@@ -1078,13 +1123,13 @@ fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, 
     match battery {
         Some(b) if b.connected => {
             let status = b.status();
-            if let Some(rest) = status.split_once("  ·  ") {
+            if let Some(rest) = status.split_once(" / ") {
                 notes.push(rest.1.to_string());
             }
         }
         _ => notes.push("未接続".into()),
     }
-    painter.text(egui::pos2(big.max.x + 10.0, big.center().y), egui::Align2::LEFT_CENTER, notes.join("  ·  "), egui::FontId::proportional(12.5), p.sub);
+    painter.text(egui::pos2(big.max.x + 10.0, big.center().y), egui::Align2::LEFT_CENTER, notes.join(" / "), egui::FontId::proportional(12.5), p.sub);
 
     // 残量バー
     let bar = egui::Rect::from_min_size(egui::pos2(rect.min.x + pad, rect.max.y - pad - 6.0), Vec2::new(rect.width() - pad * 2.0 - 70.0, 6.0));
@@ -1135,7 +1180,7 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
         ui.columns(2, |cols| {
             // 左: 減り具合
             let ui = &mut cols[0];
-            heading_with_info(ui, p, "バッテリーの減り方", "実線: 実際の減り方 (最後に充電してから、最大 24 時間分)\n点線: このまま同じペースで減った場合の予測\n\n記録が少ないうちは、G HUB の残り時間から予測します。");
+            heading_with_info(ui, p, "残量の推移", "実線: 実測値 (直近の充電以降、最大 24 時間)\n点線: 現在のペースでの予測");
             ui.add_space(6.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width() - 12.0, 150.0), egui::Sense::hover());
             let chart = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - 18.0));
@@ -1147,7 +1192,7 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
                 ui,
                 p,
                 "バッテリーの健康状態",
-                "推定値です。充電のたびにその前の放電 (何 % を何時間で使ったか) を記録し、記録が増えるほど正確になります。\n\nマウスは使わない間スリープして電池をほとんど使わないため、使い方によって実際の容量とはずれます。",
+                "充電ごとの放電記録をもとに推定した値です。使用状況により実際の値と異なる場合があります。",
             );
             ui.add_space(6.0);
 
@@ -1160,31 +1205,31 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
                     "推定容量",
                     format!("{:.2} Wh", c / 1000.0),
                     true,
-                    format!("放電量 × 満充電での持ち時間 (実測) から計算した容量です。{}", g.map(|g| format!("\nG HUB の推定: {g:.2} Wh")).unwrap_or_default()),
+                    format!("放電量 × 満充電時の使用可能時間 (実測) から算出{}", g.map(|g| format!("\nG HUB の推定: {g:.2} Wh")).unwrap_or_default()),
                 ),
-                (None, Some(g)) => ("推定容量", format!("{g:.2} Wh"), true, "G HUB の推定値です。充電の記録がたまると、実測から計算した値に切り替わります。".into()),
-                (None, None) => ("推定容量", "—".into(), false, "放電量 (G HUB が起動しているときに取得) と充電の記録がそろうと表示します。".into()),
+                (None, Some(g)) => ("推定容量", format!("{g:.2} Wh"), true, "G HUB の推定値です。充電履歴が蓄積されると実測値に切り替わります。".into()),
+                (None, None) => ("推定容量", "不明".into(), false, "放電量 (G HUB が起動しているときに取得) と充電の記録がそろうと表示します。".into()),
             });
             rows.push(match (h.full_runtime_h, battery.and_then(|b| b.max_life_hours)) {
-                (Some(r), _) => ("満充電まで", format!("約{r:.0}時間"), true, "実際の放電の記録から計算した、100% から 0% までの時間です。".into()),
-                (None, Some(g)) => ("満充電まで", format!("約{g:.0}時間"), true, "G HUB の推定値です。充電の記録がたまると、実測の値に切り替わります。".into()),
-                _ => ("満充電まで", "—".into(), false, "充電の記録がたまると表示します。".into()),
+                (Some(r), _) => ("満充電まで", format!("約{r:.0}時間"), true, "放電記録から算出した、100% から 0% までの使用可能時間です。".into()),
+                (None, Some(g)) => ("満充電まで", format!("約{g:.0}時間"), true, "G HUB の推定値です。充電履歴が蓄積されると実測値に切り替わります。".into()),
+                _ => ("満充電まで", "不明".into(), false, "充電履歴が蓄積されると表示します。".into()),
             });
             rows.push(match h.health {
-                Some(v) => ("容量", format!("{:.0}%", v * 100.0), true, "記録を始めた頃と比べた、今の容量です。".into()),
-                None => ("容量", "記録中".into(), false, format!("記録を始めた頃と比べた容量です。あと {remaining_runs} 回充電すると表示します。")),
+                Some(v) => ("容量", format!("{:.0}%", v * 100.0), true, "記録開始時と比べた現在の容量です。".into()),
+                None => ("容量", "記録中".into(), false, format!("記録開始時と比べた容量です。表示まであと {remaining_runs} 回の充電が必要です。")),
             });
-            rows.push(("充電サイクル", format!("{:.1} 回", h.cycles), true, "このアプリで記録を始めてからの充電回数です (使った % の合計 ÷ 100)。それ以前の使用分は含みません。".into()));
+            rows.push(("充電サイクル", format!("{:.1} 回", h.cycles), true, "記録開始以降の充電回数です (消費した残量の合計 ÷ 100)。".into()));
 
             let when = |label: &'static str, at: Option<(u64, Basis)>, level: &str| -> (&'static str, String, bool, String) {
                 let what = format!("容量が {level} まで減る時期の目安です。");
                 match at {
-                    Some((t, _)) if t <= now => (label, "到達済みの可能性".into(), true, what),
+                    Some((t, _)) if t <= now => (label, "到達済み (推定)".into(), true, what),
                     Some((t, basis)) => {
                         let (y, m) = health::year_month(t);
                         let why = match basis {
-                            Basis::Trend => "実際の容量の減り方から計算しています。",
-                            Basis::Cycles => "今の充電ペースと、一般的なリチウムイオン電池の寿命 (約 400 回で容量 80%、約 600 回で 70%) から計算しています。記録が 6 回・14 日以上たまると、実際の減り方からの計算に切り替わります。",
+                            Basis::Trend => "実測した容量の推移から算出。",
+                            Basis::Cycles => "充電頻度と一般的なリチウムイオン電池の寿命 (約 400 回で 80%、約 600 回で 70%) から算出。",
                         };
                         (label, format!("{y}年{m}月ごろ"), true, format!("{what}\n{why}"))
                     }
@@ -1267,7 +1312,7 @@ fn draw_trend(painter: &egui::Painter, area: egui::Rect, p: Palette, battery: Op
     let right = match (b.charging, empty, trend.drain_per_hour) {
         (true, _, _) => "充電中".to_string(),
         (false, Some(end), Some(rate)) => format!("{}後に 0%  (-{rate:.1}%/時)", hours_text((end - now) as f64 / 3600.0)),
-        _ => "減り方を計算中".to_string(),
+        _ => "予測を計算中".to_string(),
     };
     painter.text(egui::pos2(area.right(), label_y), egui::Align2::RIGHT_TOP, right, small, p.sub);
 }

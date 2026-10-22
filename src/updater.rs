@@ -237,7 +237,7 @@ pub fn verify(file: &Path, release: &Release) -> Result<(), String> {
     if let Some(expected) = &release.sha256 {
         let actual: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
         if &actual != expected {
-            return Err("SHA-256 が一致しません (ファイルが壊れているか、改ざんされています)".into());
+            return Err("SHA-256 が一致しません (破損または改ざんの可能性があります)".into());
         }
     }
     Ok(())
@@ -247,7 +247,7 @@ pub fn verify(file: &Path, release: &Release) -> Result<(), String> {
 pub fn install(new_exe: &Path, current: &Path) -> Result<(), String> {
     let old = old_path(current);
     let _ = std::fs::remove_file(&old);
-    std::fs::rename(current, &old).map_err(|e| format!("今の exe を入れ替えられません (書き込み権限がない場所かもしれません): {e}"))?;
+    std::fs::rename(current, &old).map_err(|e| format!("今の exe を入れ替えられません (書き込み権限を確認してください): {e}"))?;
     if let Err(e) = std::fs::copy(new_exe, current) {
         let _ = std::fs::remove_file(current);
         let _ = std::fs::rename(&old, current);

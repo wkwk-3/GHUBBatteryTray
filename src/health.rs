@@ -47,9 +47,14 @@ pub fn path_beside(history: &Path) -> PathBuf {
 }
 
 pub fn append(path: &Path, device: &str, run: &Run) {
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let power = run.power_mw.map(|p| format!("{p:.2}")).unwrap_or_default();
-        let _ = writeln!(f, "{},{},{},{},{:.3},{}", run.end, device, run.start_pct, run.end_pct, run.hours, power);
+    let power = run.power_mw.map(|p| format!("{p:.2}")).unwrap_or_default();
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| writeln!(f, "{},{},{},{},{:.3},{}", run.end, device, run.start_pct, run.end_pct, run.hours, power));
+    if let Err(e) = written {
+        crate::log::error(format!("health.csv に書き込めませんでした: {e}"));
     }
 }
 
