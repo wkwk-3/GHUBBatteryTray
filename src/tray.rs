@@ -94,6 +94,8 @@ pub fn combine(items: &[Pending]) -> (String, String, i32) {
 }
 
 static mut APP: Option<App> = None;
+/// 長期の統計 (取得スレッドが積み上げ、終了時に書き出す)
+static STATS: Mutex<Option<crate::stats::Recorder>> = Mutex::new(None);
 
 #[allow(static_mut_refs)]
 fn app() -> &'static mut App {
@@ -151,6 +153,12 @@ pub fn run() {
 
         for uid in 1..=app().icons.len() as u32 {
             remove_tray_icon(uid);
+        }
+        // 統計の今の 1 時間分を書き出してから終わる
+        if let Ok(mut stats) = STATS.lock() {
+            if let Some(s) = stats.as_mut() {
+                s.flush_all(crate::history::now());
+            }
         }
         log::info("I012", "アプリを終了しました");
     }
@@ -250,6 +258,9 @@ fn worker(hwnd: isize, shared: Arc<Mutex<Shared>>, refresh: Arc<AtomicBool>) {
             log::debug("D006", format!("取得結果: {}", if summary.is_empty() { "なし".into() } else { summary.join(", ") }));
         }
         recorder.record(&list);
+        if let Ok(mut stats) = STATS.lock() {
+            stats.get_or_insert_with(crate::stats::Recorder::default).observe(&list, crate::history::now());
+        }
         log_changes(&prev, &list);
         prev = list.clone();
         if let Ok(mut s) = shared.lock() {
@@ -434,7 +445,8 @@ fn placeholder_context(b: &Battery, threshold: i32) -> crate::placeholders::Cont
     let history_path = crate::history::path();
     let samples = crate::history::load_all(&history_path).remove(&key).unwrap_or_default();
     let runs = crate::health::load_all(&crate::health::path_beside(&history_path)).remove(&key).unwrap_or_default();
-    crate::placeholders::Context::build(b, Some(threshold), &samples, &runs, crate::history::now())
+    let hours = crate::stats::load(&crate::stats::path_for(&key));
+    crate::placeholders::Context::build(b, Some(threshold), &samples, &runs, &hours, crate::history::now())
 }
 
 fn check_notifications() {

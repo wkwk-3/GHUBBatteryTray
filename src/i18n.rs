@@ -314,6 +314,14 @@ pub struct Texts {
     pub recording_history: &'static str,
     pub empty_in_fmt: &'static str,
     pub calculating: &'static str,
+    pub per_charge: &'static str,
+    pub per_charge_info_fmt: &'static str,
+    pub charge_time: &'static str,
+    pub charge_time_info: &'static str,
+    pub profile_title: &'static str,
+    pub profile_info: &'static str,
+    pub daily_title: &'static str,
+    pub daily_info: &'static str,
 
     // 設定画面: 歯車
     pub language_title: &'static str,

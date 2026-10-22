@@ -132,19 +132,29 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn build(b: &Battery, threshold: Option<i32>, samples: &[Sample], runs: &[Run], now: u64) -> Context {
+    pub fn build(b: &Battery, threshold: Option<i32>, samples: &[Sample], runs: &[Run], hours: &[crate::stats::Hour], now: u64) -> Context {
         let trend = history::trend(samples, now, b);
-        let h = health::analyze(runs, now);
+        let offset = crate::log::utc_offset_secs();
+        let h = crate::stats::analyze(hours, runs, now, offset);
         let connected = b.connected && !b.asleep;
+        // 0% になる時刻: 使い方の統計があればそれに沿って、なければ今の減り方で
+        let empty_at = if connected && !b.charging {
+            crate::stats::forecast(&h, now, b.percentage as f64, trend.drain_per_hour, offset)
+                .and_then(|p| crate::stats::empty_at(&p))
+                .or_else(|| trend.empty_at(now, b.percentage))
+        } else {
+            None
+        };
 
         // 最後に充電してからの時間: 履歴の中で最後に充電していた時刻から
         let since_secs = samples.iter().rev().find(|s| s.charging).map(|s| now.saturating_sub(s.t)).filter(|_| !b.charging);
 
-        // いつもの減り方 = 記録した放電区間の中央値。今のペースと比べる
+        // いつもの減り方 = 統計の使用中の減り (なければ記録した放電区間の中央値)。今のペースと比べる
         let mut usual: Vec<f64> = runs.iter().map(|r| 100.0 / r.full_runtime_h()).filter(|v| v.is_finite() && *v > 0.0).collect();
         usual.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let pace = match (trend.drain_per_hour, usual.get(usual.len() / 2)) {
-            (Some(cur), Some(&typ)) if !b.charging => Some(if cur > typ * 1.15 {
+        let typical = h.active_rate.or_else(|| usual.get(usual.len() / 2).copied());
+        let pace = match (trend.drain_per_hour, typical) {
+            (Some(cur), Some(typ)) if !b.charging => Some(if cur > typ * 1.15 {
                 Pace::Faster
             } else if cur < typ * 0.85 {
                 Pace::Slower
@@ -162,18 +172,18 @@ impl Context {
             threshold,
             now_pct: connected.then_some(b.percentage),
             remain_h: b.remaining_hours.filter(|_| connected && !b.charging),
-            empty_at: if connected { trend.empty_at(now, b.percentage) } else { None },
+            empty_at,
             rate: trend.drain_per_hour,
             power_mw: b.power_mw.filter(|_| connected && !b.charging),
             source: b.source.map(|s| s.label()),
             time: now,
             since_secs,
             health: h.health,
-            cycles: (!runs.is_empty()).then_some(h.cycles),
+            cycles: (!runs.is_empty() || !hours.is_empty()).then_some(h.cycles),
             replace_at: h.replace_at.map(|(t, _)| t),
             pace,
             streak_secs,
-            utc_offset: crate::log::utc_offset_secs(),
+            utc_offset: offset,
         }
     }
 

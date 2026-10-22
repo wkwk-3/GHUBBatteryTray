@@ -89,6 +89,7 @@ struct Loaded {
     devices: Vec<Battery>,
     history: HashMap<String, Vec<Sample>>,
     runs: HashMap<String, Vec<Run>>,
+    stats: HashMap<String, Vec<crate::stats::Hour>>,
 }
 
 #[derive(PartialEq)]
@@ -106,6 +107,8 @@ struct SettingsApp {
     history: HashMap<String, Vec<Sample>>,
     /// デバイス名 (小文字) -> 放電区間の記録 (健康状態の推定用)
     runs: HashMap<String, Vec<Run>>,
+    /// デバイス名 (小文字) -> 1 時間ごとの長期の統計
+    stats: HashMap<String, Vec<crate::stats::Hour>>,
     loading: Option<Receiver<Loaded>>,
     /// 選択中のデバイスの詳細 (アコーディオン) を開いているか
     expanded: bool,
@@ -157,6 +160,7 @@ impl SettingsApp {
             devices: Vec::new(),
             history: HashMap::new(),
             runs: HashMap::new(),
+            stats: HashMap::new(),
             // `--expand` で詳細を開いた状態で起動
             expanded: std::env::args().any(|a| a == "--expand"),
             loading: None,
@@ -187,7 +191,12 @@ impl SettingsApp {
             let devices = sources::collect(&mut hidpp::Reader::new());
             let history = history::load_all(&history::path());
             let runs = health::load_all(&health::path_beside(&history::path()));
-            let _ = tx.send(Loaded { devices, history, runs });
+            // 統計はデバイスごとのファイル。表示する可能性のあるデバイスだけ読む
+            let mut keys: Vec<String> = devices.iter().map(|b| b.device_name.to_ascii_lowercase()).collect();
+            keys.extend(Settings::load().device_notifications.keys().map(|k| k.to_ascii_lowercase()));
+            keys.dedup();
+            let stats = keys.into_iter().map(|k| (k.clone(), crate::stats::load(&crate::stats::path_for(&k)))).collect();
+            let _ = tx.send(Loaded { devices, history, runs, stats });
             ctx.request_repaint();
         });
         self.loading = Some(rx);
@@ -262,10 +271,11 @@ impl SettingsApp {
 
     fn poll(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.loading {
-            if let Ok(Loaded { devices, history, runs }) = rx.try_recv() {
+            if let Ok(Loaded { devices, history, runs, stats }) = rx.try_recv() {
                 self.devices = devices;
                 self.history = history;
                 self.runs = runs;
+                self.stats = stats;
                 self.loading = None;
                 self.status = self.source_status();
                 let names = self.device_names();
@@ -453,7 +463,8 @@ impl SettingsApp {
             ui.add_space(12.0);
             let samples = self.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
             let runs = self.runs.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            detail_panel(ui, p, battery.as_ref(), samples, runs);
+            let hours = self.stats.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            detail_panel(ui, p, battery.as_ref(), samples, runs, hours);
         });
         state.store(ui.ctx());
 
@@ -484,7 +495,8 @@ impl SettingsApp {
         let sample_ctx = names.iter().find(|(n, _)| n.eq_ignore_ascii_case(&self.selected)).and_then(|(_, b)| b.as_ref()).map(|b| {
             let samples = self.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
             let runs = self.runs.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            placeholders::Context::build(b, None, samples, runs, history::now())
+            let hours = self.stats.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            placeholders::Context::build(b, None, samples, runs, hours, history::now())
         });
 
         egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(12).show(ui, |ui| {
@@ -1219,10 +1231,12 @@ fn heading_with_info(ui: &mut egui::Ui, p: Palette, title: &str, info: &str) {
 }
 
 /// カードの下に開く詳細: 減り具合のグラフと電池の健康状態
-fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, samples: &[Sample], runs: &[Run]) {
+fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, samples: &[Sample], runs: &[Run], hours: &[crate::stats::Hour]) {
     let now = history::now();
-    let h = health::analyze(runs, now);
-    let remaining_runs = health::MIN_RUNS - h.runs.min(health::MIN_RUNS);
+    let offset = log::utc_offset_secs();
+    // 長期の統計があればそこから、なければ放電区間の記録から
+    let h = crate::stats::analyze(hours, runs, now, offset);
+    let pending = h.need_days.map(|d| d as usize).unwrap_or_else(|| health::MIN_RUNS - h.runs.min(health::MIN_RUNS));
 
     egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(16).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
@@ -1233,7 +1247,7 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
             ui.add_space(6.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width() - 12.0, 150.0), egui::Sense::hover());
             let chart = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - 18.0));
-            draw_trend(ui.painter(), chart, p, battery, samples);
+            draw_trend(ui.painter(), chart, p, battery, samples, &h, offset);
 
             // 右: 健康状態
             let ui = &mut cols[1];
@@ -1268,7 +1282,15 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
             });
             rows.push(match h.health {
                 Some(v) => (tx.capacity, pct(format!("{:.0}", v * 100.0)), true, tx.capacity_info.into()),
-                None => (tx.capacity, tx.recording.into(), false, f(tx.capacity_pending_fmt, &[&remaining_runs])),
+                None => (tx.capacity, tx.recording.into(), false, f(tx.capacity_pending_fmt, &[&pending])),
+            });
+            rows.push(match h.daily_drain {
+                Some(d) => (tx.per_charge, f(tx.about_fmt, &[&f(tx.days_fmt, &[&dec(100.0 / d, 1)])]), true, f(tx.per_charge_info_fmt, &[&pct(format!("-{}", dec(d, 1)))])),
+                None => (tx.per_charge, tx.recording.into(), false, tx.need_a_day.into()),
+            });
+            rows.push(match h.charge_time_h {
+                Some(c) => (tx.charge_time, about_h(c), true, tx.charge_time_info.into()),
+                None => (tx.charge_time, tx.recording.into(), false, tx.charge_time_info.into()),
             });
             rows.push((tx.cycles_label, f(tx.cycles_fmt, &[&dec(h.cycles, 1)]), true, tx.cycles_info.into()));
 
@@ -1301,6 +1323,21 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
                 }
             });
         });
+
+        ui.add_space(14.0);
+        ui.columns(2, |cols| {
+            let ui = &mut cols[0];
+            heading_with_info(ui, p, t().profile_title, t().profile_info);
+            ui.add_space(6.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width() - 12.0, 120.0), egui::Sense::hover());
+            draw_profile(ui.painter(), rect, p, h.profile.as_ref(), local_hour_now(now, offset));
+
+            let ui = &mut cols[1];
+            heading_with_info(ui, p, t().daily_title, t().daily_info);
+            ui.add_space(6.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width() - 12.0, 120.0), egui::Sense::hover());
+            draw_daily(ui.painter(), rect, p, &h.daily, offset);
+        });
     });
 }
 
@@ -1308,7 +1345,7 @@ fn hours_text(h: f64) -> String {
     f(t().about_fmt, &[&placeholders::duration_text((h * 3600.0) as u64)])
 }
 
-fn draw_trend(painter: &egui::Painter, area: egui::Rect, p: Palette, battery: Option<&Battery>, samples: &[Sample]) {
+fn draw_trend(painter: &egui::Painter, area: egui::Rect, p: Palette, battery: Option<&Battery>, samples: &[Sample], h: &health::Health, offset: i64) {
     painter.rect_filled(area, CornerRadius::same(4), p.chart_bg);
     for pct in [0.0, 50.0, 100.0] {
         let y = area.bottom() - area.height() * pct / 100.0;
@@ -1324,7 +1361,9 @@ fn draw_trend(painter: &egui::Painter, area: egui::Rect, p: Palette, battery: Op
 
     let now = history::now();
     let trend = history::trend(samples, now, b);
-    let empty = trend.empty_at(now, b.percentage);
+    // 予測: 使い方の統計があれば時間帯に沿った曲線、なければ今の減り方の直線
+    let curve = if b.charging { None } else { crate::stats::forecast(h, now, b.percentage as f64, trend.drain_per_hour, offset) };
+    let empty = curve.as_deref().and_then(crate::stats::empty_at).or_else(|| trend.empty_at(now, b.percentage));
 
     // 横軸: 実績の始まり 〜 0% になる予測時刻
     let t1 = empty.unwrap_or(now + 3600).max(now + 60);
@@ -1350,9 +1389,16 @@ fn draw_trend(painter: &egui::Painter, area: egui::Rect, p: Palette, battery: Op
     }
 
     // 予測 (点線)
-    if let Some(end) = empty {
-        let from = at(now, b.percentage as f64);
-        painter.extend(egui::Shape::dashed_line(&[from, at(end, 0.0)], line, 4.0, 3.0));
+    match (&curve, empty) {
+        (Some(c), _) if c.len() >= 2 => {
+            let pts: Vec<Pos2> = c.iter().filter(|(t, _)| *t <= t1).map(|(t, v)| at(*t, *v)).collect();
+            painter.extend(egui::Shape::dashed_line(&pts, line, 4.0, 3.0));
+        }
+        (_, Some(end)) => {
+            let from = at(now, b.percentage as f64);
+            painter.extend(egui::Shape::dashed_line(&[from, at(end, 0.0)], line, 4.0, 3.0));
+        }
+        _ => {}
     }
     painter.circle_filled(at(now, b.percentage as f64), 3.0, p.chart_line);
 
@@ -1366,6 +1412,68 @@ fn draw_trend(painter: &egui::Painter, area: egui::Rect, p: Palette, battery: Op
         _ => t().calculating.to_string(),
     };
     painter.text(egui::pos2(area.right(), label_y), egui::Align2::RIGHT_TOP, right, small, p.sub);
+}
+
+fn local_hour_now(now: u64, offset: i64) -> usize {
+    ((now as i64 + offset).rem_euclid(86_400) / 3600) as usize
+}
+
+/// 時間帯ごとの減り方 (24 本の棒。今の時間帯を強調)
+fn draw_profile(painter: &egui::Painter, area: egui::Rect, p: Palette, profile: Option<&[f64; 24]>, now_hour: usize) {
+    let chart = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - 16.0));
+    painter.rect_filled(chart, CornerRadius::same(4), p.chart_bg);
+    let small = egui::FontId::proportional(10.5);
+    let Some(profile) = profile else {
+        painter.text(chart.center(), egui::Align2::CENTER_CENTER, t().recording, small, p.sub);
+        return;
+    };
+    let max = profile.iter().cloned().fold(0.0, f64::max).max(0.1);
+    let w = chart.width() / 24.0;
+    for (i, v) in profile.iter().enumerate() {
+        let hgt = (chart.height() - 14.0) * (*v / max) as f32;
+        let x = chart.left() + w * i as f32;
+        let bar = egui::Rect::from_min_max(egui::pos2(x + 1.5, chart.bottom() - hgt), egui::pos2(x + w - 1.5, chart.bottom()));
+        let color = if i == now_hour { p.chart_line } else { p.chart_line.gamma_multiply(0.45) };
+        painter.rect_filled(bar, CornerRadius::same(2), color);
+    }
+    // 最大値 (左上) と時刻 (下)
+    painter.text(chart.left_top() + Vec2::new(4.0, 2.0), egui::Align2::LEFT_TOP, format!("{}{}", dec(max, 1), t().per_hour), small.clone(), p.sub);
+    for hr in [0, 6, 12, 18] {
+        painter.text(egui::pos2(chart.left() + w * hr as f32, chart.bottom() + 2.0), egui::Align2::LEFT_TOP, format!("{hr}:00"), small.clone(), p.sub);
+    }
+}
+
+/// 1 日ごとの消費 (直近 30 日の棒)
+fn draw_daily(painter: &egui::Painter, area: egui::Rect, p: Palette, daily: &[(u64, f64)], offset: i64) {
+    let chart = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - 16.0));
+    painter.rect_filled(chart, CornerRadius::same(4), p.chart_bg);
+    let small = egui::FontId::proportional(10.5);
+    if daily.iter().all(|d| d.1 <= 0.0) {
+        painter.text(chart.center(), egui::Align2::CENTER_CENTER, t().recording, small, p.sub);
+        return;
+    }
+    let max = daily.iter().map(|d| d.1).fold(0.0, f64::max).max(1.0);
+    let n = crate::stats::RECENT_DAYS as f32;
+    let w = chart.width() / n;
+    // 右端が今日。足りない日は左を空ける
+    let skip = n as usize - daily.len().min(n as usize);
+    for (i, (_, v)) in daily.iter().enumerate() {
+        let hgt = (chart.height() - 14.0) * (*v / max) as f32;
+        let x = chart.left() + w * (skip + i) as f32;
+        let bar = egui::Rect::from_min_max(egui::pos2(x + 1.0, chart.bottom() - hgt), egui::pos2(x + w - 1.0, chart.bottom()));
+        let color = if i + 1 == daily.len() { p.chart_line } else { p.chart_line.gamma_multiply(0.45) };
+        painter.rect_filled(bar, CornerRadius::same(2), color);
+    }
+    painter.text(chart.left_top() + Vec2::new(4.0, 2.0), egui::Align2::LEFT_TOP, pct(format!("{:.0}", max)), small.clone(), p.sub);
+    // 最初と最後の日付
+    let date = |day: u64| {
+        let (_, m, d) = health::ymd((day as i64 + offset).max(0) as u64);
+        f(t().date_md_fmt, &[&m, &d])
+    };
+    if let (Some(first), Some(last)) = (daily.first(), daily.last()) {
+        painter.text(egui::pos2(chart.left() + w * skip as f32, chart.bottom() + 2.0), egui::Align2::LEFT_TOP, date(first.0), small.clone(), p.sub);
+        painter.text(egui::pos2(chart.right(), chart.bottom() + 2.0), egui::Align2::RIGHT_TOP, date(last.0), small, p.sub);
+    }
 }
 
 fn setup_style(ctx: &egui::Context, dark: bool) {

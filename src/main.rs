@@ -13,6 +13,7 @@ mod placeholders;
 mod settings;
 mod sources;
 mod startup;
+mod stats;
 mod tray;
 mod updater;
 mod webhook;
@@ -392,10 +393,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "3.0.0");
+        assert_eq!(crate::updater::CURRENT, "3.1.0");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v3.0.1").is_newer() && r("v3.1.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v3.0.0").is_newer() && !r("v3.0").is_newer() && !r("v2.5.0").is_newer() && !r("nightly").is_newer());
+        assert!(r("v3.1.1").is_newer() && r("v3.2.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v3.1.0").is_newer() && !r("v3.1").is_newer() && !r("v3.0.0").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -586,7 +587,7 @@ SHA256: {}", hash.to_uppercase()),
         let samples = vec![Sample { t: now - 2 * h - 60, percent: 90, charging: true }, Sample { t: now - 2 * h, percent: 90, charging: false }, Sample { t: now - h, percent: 80, charging: false }];
         // いつもは 1 時間に 5% (満充電で 20 時間)
         let runs: Vec<crate::health::Run> = (0..3).map(|i| crate::health::Run { end: i * 24 * h, start_pct: 100, end_pct: 50, hours: 10.0, power_mw: Some(14.7) }).collect();
-        let ctx = Context::build(&b, Some(20), &samples, &runs, now);
+        let ctx = Context::build(&b, Some(20), &samples, &runs, &[], now);
         assert_eq!(ctx.pace, Some(Pace::Faster));
         assert_eq!(ctx.since_secs, Some(2 * h + 60));
         assert_eq!(ctx.streak_secs, Some(10 * h)); // 記録の 10 時間 > 今の 2 時間
@@ -626,7 +627,7 @@ SHA256: {}", hash.to_uppercase()),
         // ログの ID (E001 など) は 1 か所でだけ使う
         let sources = [
             include_str!("envinfo.rs"), include_str!("ghub.rs"), include_str!("health.rs"), include_str!("hidpp.rs"), include_str!("history.rs"),
-            include_str!("log.rs"), include_str!("main.rs"), include_str!("settings.rs"), include_str!("sources.rs"), include_str!("startup.rs"),
+            include_str!("log.rs"), include_str!("main.rs"), include_str!("settings.rs"), include_str!("sources.rs"), include_str!("startup.rs"), include_str!("stats.rs"),
             include_str!("tray.rs"), include_str!("ui.rs"), include_str!("updater.rs"), include_str!("webhook.rs"),
         ];
         let mut seen = std::collections::HashSet::new();
@@ -641,5 +642,140 @@ SHA256: {}", hash.to_uppercase()),
             }
         }
         assert!(seen.len() >= 70, "{}", seen.len());
+    }
+
+    fn stats_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ghbt_stats_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn mouse(pct: i32, charging: bool, power: Option<f64>) -> crate::ghub::Battery {
+        crate::ghub::Battery { device_name: "mouse".into(), percentage: pct, connected: true, charging, power_mw: power, ..Default::default() }
+    }
+
+    #[test]
+    fn stats_records_hourly_with_exact_totals() {
+        use crate::stats::{Recorder, load, path_in};
+        let dir = stats_dir("hourly");
+        let mut r = Recorder::new(dir.clone());
+        // 10:30 から 3 時間、1 分ごとに読み取り。30 分で 1% ずつ減る (放電量 15 mW)
+        let t0 = 1_800_000_000u64 / 3600 * 3600 + 1800;
+        for m in 0..=180u64 {
+            let pct = 90 - (m / 30) as i32;
+            r.observe(&[mouse(pct, false, Some(15.0))], t0 + m * 60);
+        }
+        r.flush_all(t0 + 180 * 60);
+        let hours = load(&path_in(&dir, "mouse"));
+        assert_eq!(hours.len(), 4, "{hours:?}");
+        let use_secs: u32 = hours.iter().map(|h| h.use_secs as u32).sum();
+        let drain: u32 = hours.iter().map(|h| h.drain_m as u32).sum();
+        assert_eq!(use_secs, 180 * 60);
+        assert_eq!(drain, 6000); // 6% (整数 % の読み取りでも合計はずれない)
+        assert!(hours.iter().all(|h| h.power_cw == 1500 || h.power_secs == 0));
+        // 時の境目で分かれている (最初の時は 30 分ぶん)
+        assert_eq!(hours[0].use_secs, 1800);
+        assert_eq!(hours[0].hour as u64, t0 / 3600);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stats_counts_unobserved_drop_as_gap() {
+        use crate::stats::{Recorder, load, path_in};
+        let dir = stats_dir("gap");
+        let mut r = Recorder::new(dir.clone());
+        let t0 = 1_800_000_000u64;
+        r.observe(&[mouse(80, false, None)], t0);
+        // 8 時間読めなかった間に 3% 減っていた
+        r.observe(&[mouse(77, false, None)], t0 + 8 * 3600);
+        r.flush_all(t0 + 8 * 3600);
+        let hours = load(&path_in(&dir, "mouse"));
+        assert_eq!(hours.iter().map(|h| h.gap_m as u32).sum::<u32>(), 3000);
+        assert_eq!(hours.iter().map(|h| h.use_secs as u32).sum::<u32>(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stats_file_overwrites_same_hour_and_drops_broken_tail() {
+        use crate::stats::{Recorder, load, path_in};
+        let dir = stats_dir("upsert");
+        let mut r = Recorder::new(dir.clone());
+        let t0 = 1_800_000_000u64 / 3600 * 3600;
+        r.observe(&[mouse(50, false, None)], t0);
+        r.observe(&[mouse(49, false, None)], t0 + 600);
+        r.flush_all(t0 + 600);
+        r.observe(&[mouse(48, false, None)], t0 + 1200);
+        r.flush_all(t0 + 1200);
+        let path = path_in(&dir, "mouse");
+        assert_eq!(load(&path).len(), 1, "同じ時は上書き");
+        // 途中で落ちて半端なバイトが残っても、次の書き込みで捨てる
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[1, 2, 3]).unwrap();
+        assert_eq!(load(&path).len(), 1);
+        r.observe(&[mouse(47, false, None)], t0 + 3600 + 60);
+        r.flush_all(t0 + 3600 + 60);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 + 20 * 2);
+        let _ = std::fs::remove_dir_all(dir);
+        use std::io::Write;
+    }
+
+    /// 合成データ: days 日、毎日 20〜24 時に使用。容量は 1 日 0.1% ずつ減る (放電量 15 mW)
+    fn synthetic_hours(days: u64, start: u64) -> Vec<crate::stats::Hour> {
+        let mut v = Vec::new();
+        for d in 0..days {
+            let cap = 300.0 * (1.0 - 0.001 * d as f64); // mWh
+            let per_hour = 15.0 / cap * 100.0; // 使用中 1 時間で減る %
+            for hr in 0..24u64 {
+                let t = start + d * 86400 + hr * 3600;
+                let mut h = crate::stats::Hour { hour: (t / 3600) as u32, gap_m: 50, ..Default::default() };
+                if (20..24).contains(&hr) {
+                    h.use_secs = 3600;
+                    h.drain_m = (per_hour * 1000.0) as u16;
+                    h.power_cw = 1500;
+                    h.power_secs = 3600;
+                    h.power_drain_m = h.drain_m;
+                }
+                v.push(h);
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn stats_estimates_capacity_health_and_dates() {
+        let start = 1_800_000_000u64 / 86400 * 86400;
+        let days = 120;
+        let hours = synthetic_hours(days, start);
+        let now = start + days * 86400;
+        let h = crate::stats::analyze(&hours, &[], now, 0);
+        // 直近 30 日の容量は 300 × (1 - 0.001 × 約 105) 前後
+        let cap = h.capacity_mwh.unwrap();
+        assert!((cap - 300.0 * (1.0 - 0.001 * 105.0)).abs() < 3.0, "{cap}");
+        let health = h.health.unwrap();
+        assert!(health < 0.93 && health > 0.85, "{health}");
+        let (deg, basis) = h.degrade_at.unwrap();
+        assert_eq!(basis, crate::health::Basis::Trend);
+        // 80% になるのは開始から約 200 日後
+        let deg_day = (deg - start) as f64 / 86400.0;
+        assert!((deg_day - 200.0).abs() < 15.0, "{deg_day}");
+        assert!(h.replace_at.unwrap().0 > deg);
+        // 時間帯ごとの減り方: 使う 20〜23 時が高い
+        let p = h.profile.unwrap();
+        assert!(p[21] > p[3] * 10.0, "{p:?}");
+        assert!(h.daily_drain.unwrap() > 10.0);
+        assert_eq!(h.daily.len(), 30);
+        // 予測は 0% まで届く
+        let f = crate::stats::forecast(&h, now, 50.0, None, 0).unwrap();
+        assert!(crate::stats::empty_at(&f).is_some());
+    }
+
+    #[test]
+    fn stats_needs_days_before_health() {
+        let start = 1_800_000_000u64 / 86400 * 86400;
+        let hours = synthetic_hours(5, start);
+        let h = crate::stats::analyze(&hours, &[], start + 5 * 86400, 0);
+        assert!(h.health.is_none());
+        assert_eq!(h.need_days, Some(23));
+        // 寿命の目安は充電ペースから
+        assert_eq!(h.degrade_at.unwrap().1, crate::health::Basis::Cycles);
     }
 }

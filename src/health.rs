@@ -107,6 +107,18 @@ pub struct Health {
     pub degrade_at: Option<(u64, Basis)>,
     /// 容量 70% になる目安 (買い替え時期)
     pub replace_at: Option<(u64, Basis)>,
+    /// 使用中の 1 時間あたりの減り (%)
+    pub active_rate: Option<f64>,
+    /// 0% から 100% までの充電時間
+    pub charge_time_h: Option<f64>,
+    /// 時間帯 (現地の 0〜23 時) ごとの 1 時間あたりの平均の減り (%、使っていない時間も含む)
+    pub profile: Option<[f64; 24]>,
+    /// 1 日あたりの平均の減り (%)
+    pub daily_drain: Option<f64>,
+    /// 1 日ごとの減り (現地の日の始まり, %)。直近 30 日
+    pub daily: Vec<(u64, f64)>,
+    /// 容量の比較を出すまでに必要な日数
+    pub need_days: Option<u32>,
 }
 
 fn median(mut v: Vec<f64>) -> Option<f64> {
