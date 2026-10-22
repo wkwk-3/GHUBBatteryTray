@@ -87,6 +87,7 @@
     <None Include="src\main.rs" />
     <None Include="src\startup.rs" />
     <None Include="src\log.rs" />
+    <None Include="src\placeholders.rs" />
     <None Include="src\settings.rs" />
     <None Include="src\sources.rs" />
     <None Include="src\tray.rs" />

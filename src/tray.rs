@@ -420,6 +420,15 @@ fn show_balloon(title: &str, text: &str, kind: i32) {
     }
 }
 
+/// 置換文字の値を作る (履歴・放電の記録を読む)
+fn placeholder_context(b: &Battery, threshold: i32) -> crate::placeholders::Context {
+    let key = b.device_name.to_ascii_lowercase();
+    let history_path = crate::history::path();
+    let samples = crate::history::load_all(&history_path).remove(&key).unwrap_or_default();
+    let runs = crate::health::load_all(&crate::health::path_beside(&history_path)).remove(&key).unwrap_or_default();
+    crate::placeholders::Context::build(b, Some(threshold), &samples, &runs, crate::history::now())
+}
+
 fn check_notifications() {
     let list = batteries();
     let a = app();
@@ -444,7 +453,7 @@ fn check_notifications() {
             // 充電中は残量低下を通知しない
             if !b.charging && b.percentage <= rule.battery {
                 if a.notified.insert(key) {
-                    let text = rule.message.replace("{name}", b.label()).replace("{battery}", &rule.battery.to_string()).replace("{rn}", "\r\n");
+                    let text = crate::placeholders::expand(&rule.message, &placeholder_context(b, rule.battery));
                     notify(b.label(), &text, rule.balloon_tip_icon);
                     webhook::send_if_enabled(&a.settings, webhook::Message { title: b.label().into(), text, device: b.device_name.clone(), battery: b.percentage, event: "low_battery" });
                 }

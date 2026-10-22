@@ -7,6 +7,7 @@ mod health;
 mod history;
 mod icon;
 mod log;
+mod placeholders;
 mod settings;
 mod sources;
 mod startup;
@@ -388,10 +389,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "2.3.0");
+        assert_eq!(crate::updater::CURRENT, "2.4.0");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v2.3.1").is_newer() && r("v2.4.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v2.3.0").is_newer() && !r("v2.3").is_newer() && !r("v2.2.0").is_newer() && !r("nightly").is_newer());
+        assert!(r("v2.4.1").is_newer() && r("v2.5.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v2.4.0").is_newer() && !r("v2.4").is_newer() && !r("v2.3.0").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -503,5 +504,89 @@ SHA256: {}", hash.to_uppercase()),
     fn defer_in_fullscreen_defaults_on() {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert!(s.defer_in_fullscreen);
+    }
+
+    #[test]
+    fn placeholders_expand_all_keys() {
+        use crate::placeholders::{expand, Context, Pace};
+        let h = 3600u64;
+        let now = 1_792_627_200 + 9 * h; // 2026-10-22 18:00 (JST)
+        let ctx = Context {
+            name: "PRO 2".into(),
+            threshold: Some(20),
+            now_pct: Some(18),
+            remain_h: Some(3.2),
+            empty_at: Some(now + 3 * h + 40 * 60),
+            rate: Some(5.25),
+            power_mw: Some(14.74),
+            source: Some("直接通信"),
+            time: now,
+            since_secs: Some(9 * h),
+            health: Some(0.97),
+            cycles: Some(7.9),
+            replace_at: Some(1_812_000_000),
+            pace: Some(Pace::Faster),
+            streak_secs: Some(3 * 24 * h),
+            utc_offset: 9 * 3600,
+        };
+        let t = "{name}|{battery}|{now}|{remain}|{empty_at}|{rate}|{power}|{source}|{time}|{since}|{health}|{cycles}|{replace}|{bar}|{pace}|{streak}|{rn}|{unknown}|{";
+        assert_eq!(
+            expand(t, &ctx),
+            "PRO 2|20|18|約3時間|21:40ごろ|-5.2%/時|14.7 mW|直接通信|18:00|9時間|97%|7.9回|2027年6月ごろ|■■□□□□□□□□|いつもより速い|3日|\r\n|{unknown}|{"
+        );
+        // 分からない値は「—」
+        let empty = Context { name: "X".into(), time: now, utc_offset: 9 * 3600, ..Default::default() };
+        assert_eq!(expand("{now}/{remain}/{pace}/{health}", &empty), "—/—/—/—");
+    }
+
+    #[test]
+    fn placeholders_formatting() {
+        use crate::placeholders::{bar_text, clock_text, duration_text};
+        assert_eq!(bar_text(0), "□□□□□□□□□□");
+        assert_eq!(bar_text(100), "■■■■■■■■■■");
+        assert_eq!(bar_text(55), "■■■■■■□□□□");
+        assert_eq!(duration_text(30 * 60), "30分");
+        assert_eq!(duration_text(9 * 3600), "9時間");
+        assert_eq!(duration_text(3 * 86400), "3日");
+        let now = 1_792_627_200 + 9 * 3600; // 18:00 JST
+        assert_eq!(clock_text(now + 3600, now, 9 * 3600), "19:00");
+        assert_eq!(clock_text(now + 12 * 3600, now, 9 * 3600), "明日 6:00");
+        assert_eq!(clock_text(now + 50 * 3600, now, 9 * 3600), "10/24 20:00");
+    }
+
+    #[test]
+    fn placeholder_candidates_order() {
+        use crate::placeholders::{candidates, DEFS};
+        let keys = |q: &str| candidates(q).iter().map(|d| d.key).collect::<Vec<_>>();
+        // 何も入力していなければ名前順で全部
+        assert_eq!(keys("").len(), DEFS.len());
+        assert_eq!(keys("")[..3], ["bar", "battery", "cycles"]);
+        // 前方一致 → 部分一致 の順
+        assert_eq!(keys("s")[..3], ["since", "source", "streak"]);
+        assert_eq!(keys("re")[..2], ["remain", "replace"]);
+        assert_eq!(keys("at")[..3], ["rate", "battery", "empty_at"]); // 前方一致なし → 部分一致を近い順 (編集距離)
+        // 説明文でも探せる
+        assert_eq!(keys("残量")[0], "bar");
+        // 綴りが近いもの (順番どおりに文字を含む)
+        assert_eq!(keys("pwr")[0], "power");
+    }
+
+    #[test]
+    fn placeholder_context_from_history() {
+        use crate::history::Sample;
+        use crate::placeholders::{Context, Pace};
+        let h = 3600u64;
+        let now = 100 * h;
+        let mut b = battery(70, false, Some(10.0));
+        b.power_mw = Some(14.7);
+        // 2 時間前に充電を外し、そこから 1 時間に 10% ずつ減っている
+        let samples = vec![Sample { t: now - 2 * h - 60, percent: 90, charging: true }, Sample { t: now - 2 * h, percent: 90, charging: false }, Sample { t: now - h, percent: 80, charging: false }];
+        // いつもは 1 時間に 5% (満充電で 20 時間)
+        let runs: Vec<crate::health::Run> = (0..3).map(|i| crate::health::Run { end: i * 24 * h, start_pct: 100, end_pct: 50, hours: 10.0, power_mw: Some(14.7) }).collect();
+        let ctx = Context::build(&b, Some(20), &samples, &runs, now);
+        assert_eq!(ctx.pace, Some(Pace::Faster));
+        assert_eq!(ctx.since_secs, Some(2 * h + 60));
+        assert_eq!(ctx.streak_secs, Some(10 * h)); // 記録の 10 時間 > 今の 2 時間
+        assert_eq!(ctx.value("now").as_deref(), Some("70"));
     }
 }

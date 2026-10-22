@@ -365,3 +365,5 @@ FodyWeavers.xsd
 # Rust / cargo
 target/
 **/*.rs.bk
+
+*.patch

@@ -26,6 +26,15 @@ fn path() -> std::path::PathBuf {
     crate::settings::dir().join("GHUBBatteryTray.log")
 }
 
+/// 現地時刻の UTC からのずれ (秒)
+pub fn utc_offset_secs() -> i64 {
+    unsafe {
+        let mut tz = TIME_ZONE_INFORMATION::default();
+        let bias = if GetTimeZoneInformation(&mut tz) == 2 { tz.Bias + tz.DaylightBias } else { tz.Bias + tz.StandardBias };
+        -(bias as i64) * 60
+    }
+}
+
 /// 現地時刻と UTC からのずれ
 fn timestamp() -> String {
     unsafe {

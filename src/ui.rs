@@ -3,7 +3,7 @@
 use crate::ghub::{Battery, Source};
 use crate::icon::level_color;
 use crate::settings::{LevelColor, LevelColors};
-use crate::{log, startup, updater};
+use crate::{log, placeholders, startup, updater};
 use crate::settings::{Rule, Settings, Theme, WebhookFormat};
 use crate::health::{self, Basis, Run};
 use crate::history::{self, Sample};
@@ -128,6 +128,19 @@ struct SettingsApp {
     update_job: Option<Receiver<UpdateJob>>,
     /// 直前の確認・更新の結果 (成功か, 文言)
     update_message: Option<(bool, String)>,
+    /// 置換文字の補完
+    completion: Option<Completion>,
+}
+
+/// 通知内容の置換文字の補完 (どの行で、どこから置き換えるか)
+#[derive(Clone, Debug, Default)]
+struct Completion {
+    row: usize,
+    /// 置き換えを始める文字位置 ('{' の位置、または Tab を押した位置)
+    start: usize,
+    selected: usize,
+    /// 候補の一覧にマウスが乗っているか (クリックで選ぶ間は閉じない)
+    hovered: bool,
 }
 
 enum UpdateJob {
@@ -162,6 +175,7 @@ impl SettingsApp {
             update_state: updater::State::load(),
             update_job: None,
             update_message: None,
+            completion: None,
         };
         app.refresh(&cc.egui_ctx);
         log::info("設定画面を開きました");
@@ -335,7 +349,11 @@ impl eframe::App for SettingsApp {
             // フッター (下端に固定)
             egui::Panel::bottom("footer").frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { top: 10, ..Default::default() })).show(ui, |ui| {
                 if self.tab == Tab::Devices {
-                    ui.label(RichText::new("使用可能置換:  {name} デバイス名   {battery} しきい値   {rn} 改行").color(p.sub).size(12.5));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("使用可能置換:  通知内容で { を入力するか Tab キーで候補を表示").color(p.sub).size(12.5));
+                        let list: Vec<String> = placeholders::DEFS.iter().map(|d| format!("{{{}}}  {}  (例: {})", d.key, d.desc, d.sample)).collect();
+                        info_icon(ui, p, &list.join("\n"));
+                    });
                     ui.add_space(8.0);
                 }
                 ui.horizontal(|ui| {
@@ -430,9 +448,18 @@ impl SettingsApp {
         });
         ui.add_space(6.0);
 
+        // 候補のサンプルは、選んでいるデバイスの今の値で見せる
+        let key = self.selected.to_ascii_lowercase();
+        let sample_ctx = names.iter().find(|(n, _)| n.eq_ignore_ascii_case(&self.selected)).and_then(|(_, b)| b.as_ref()).map(|b| {
+            let samples = self.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            let runs = self.runs.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            placeholders::Context::build(b, None, samples, runs, history::now())
+        });
+
         egui::Frame::new().fill(p.card).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(12).show(ui, |ui| {
             ui.set_min_size(Vec2::new(ui.available_width(), ui.available_height().max(170.0)));
-            if rules_table(ui, p, self.settings.device_notifications.entry(self.selected.clone()).or_default()) {
+            let rules = self.settings.device_notifications.entry(self.selected.clone()).or_default();
+            if rules_table(ui, p, rules, &mut self.completion, sample_ctx.as_ref()) {
                 self.dirty = true;
             }
         });
@@ -831,7 +858,7 @@ fn format_label(f: WebhookFormat) -> &'static str {
 }
 
 /// 通知設定の表。変更があれば true
-fn rules_table(ui: &mut egui::Ui, p: Palette, rules: &mut Vec<Rule>) -> bool {
+fn rules_table(ui: &mut egui::Ui, p: Palette, rules: &mut Vec<Rule>, completion: &mut Option<Completion>, sample_ctx: Option<&placeholders::Context>) -> bool {
     // 列幅: 有効 / 残量 / アイコン / 通知内容 (残り) / 削除
     const W: [f32; 3] = [44.0, 110.0, 100.0];
     const DELETE_W: f32 = 50.0;
@@ -876,7 +903,7 @@ fn rules_table(ui: &mut egui::Ui, p: Palette, rules: &mut Vec<Rule>) -> bool {
                             }
                         });
                 });
-                changed |= ui.add_sized([message_w, h], egui::TextEdit::singleline(&mut rule.message).align(egui::Align2::LEFT_CENTER)).changed();
+                changed |= message_field(ui, p, i, rule, message_w, completion, sample_ctx);
                 if ui.add_sized([DELETE_W, h], egui::Button::new(RichText::new("削除").color(p.danger)).frame(false)).clicked() {
                     remove = Some(i);
                 }
@@ -888,6 +915,128 @@ fn rules_table(ui: &mut egui::Ui, p: Palette, rules: &mut Vec<Rule>) -> bool {
     if let Some(i) = remove {
         rules.remove(i);
         changed = true;
+    }
+    changed
+}
+
+/// 文字位置 (文字数) で切り出す
+fn char_slice(chars: &[char], from: usize, to: usize) -> String {
+    chars[from.min(chars.len())..to.min(chars.len())].iter().collect()
+}
+
+/// 通知内容の入力欄。{ を入力するか Tab で置換文字の候補を出す。変更があれば true
+fn message_field(ui: &mut egui::Ui, p: Palette, row: usize, rule: &mut Rule, width: f32, completion: &mut Option<Completion>, sample_ctx: Option<&placeholders::Context>) -> bool {
+    let id = ui.make_persistent_id(("message", row));
+    let focused = ui.ctx().memory(|m| m.has_focus(id));
+    let open_here = completion.as_ref().is_some_and(|c| c.row == row);
+
+    // 入力欄にフォーカスがあるときは Tab を補完に使う (次の欄へ移らない)
+    let (mut tab, mut back, mut down, mut up, mut enter, mut esc) = (false, false, false, false, false, false);
+    if focused {
+        ui.ctx().input_mut(|i| {
+            back = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+            tab = i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+            if open_here {
+                down = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                up = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+                enter = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                esc = i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            }
+        });
+    }
+
+    let before = rule.message.clone();
+    let mut out = egui::TextEdit::singleline(&mut rule.message).id(id).lock_focus(true).desired_width(width).min_size(Vec2::new(width, CONTROL_H)).align(egui::Align2::LEFT_CENTER).show(ui);
+    let mut changed = out.response.changed();
+    // 置き換えたプレビュー (候補の一覧を開いている間は、一覧に重なるので出さない)
+    if let Some(ctx) = sample_ctx.filter(|_| !open_here) {
+        out.response.response =out.response.response.clone().on_hover_text(format!("プレビュー:\n{}", placeholders::expand(&rule.message, &placeholders::Context { threshold: Some(rule.battery), ..ctx.clone() })));
+    }
+    let chars: Vec<char> = rule.message.chars().collect();
+    let cursor = out.cursor_range.map(|r| r.primary.index.0).unwrap_or(chars.len()).min(chars.len());
+
+    // { を入力したら開く
+    if focused && rule.message != before && cursor > 0 && chars[cursor - 1] == '{' && !open_here {
+        *completion = Some(Completion { row, start: cursor - 1, ..Default::default() });
+    }
+    // Tab: 開いていなければ開き、開いていれば次の候補へ (Shift+Tab で前へ)
+    let mut moved = 0i32;
+    if tab || back {
+        if completion.as_ref().is_some_and(|c| c.row == row) {
+            moved = if back { -1 } else { 1 };
+        } else {
+            // カーソルの前に閉じていない { があれば、そこから置き換える
+            let brace = chars[..cursor].iter().rposition(|&c| c == '{' || c == '}').filter(|&i| chars[i] == '{');
+            *completion = Some(Completion { row, start: brace.unwrap_or(cursor), ..Default::default() });
+        }
+    }
+    moved += i32::from(down) - i32::from(up);
+
+    let Some(comp) = completion.as_mut().filter(|c| c.row == row) else { return changed };
+
+    // 入力中の文字から候補を絞る ('{' の後ろ〜カーソル)
+    let has_brace = chars.get(comp.start) == Some(&'{');
+    let query = if cursor >= comp.start { char_slice(&chars, comp.start + usize::from(has_brace), cursor) } else { String::new() };
+    let close = esc || cursor < comp.start || query.contains(['}', ' ', '{']) || (!focused && !comp.hovered);
+    if close {
+        *completion = None;
+        return changed;
+    }
+    let list = placeholders::candidates(&query);
+    let n = list.len() as i32;
+    comp.selected = (comp.selected as i32 + moved).rem_euclid(n.max(1)) as usize;
+
+    // 候補の一覧 (入力欄のすぐ下)
+    let mut clicked = None;
+    let area = egui::Area::new(id.with("completion")).order(egui::Order::Foreground).fixed_pos(out.response.rect.left_bottom() + Vec2::new(0.0, 4.0)).show(ui.ctx(), |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_width(460.0);
+            ui.label(RichText::new("Tab / ↑↓ で選択、Enter かクリックで決定、Esc で閉じる").color(p.sub).size(11.0));
+            ui.add_space(2.0);
+            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                for (i, d) in list.iter().enumerate() {
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), egui::Sense::click());
+                    let selected = i == comp.selected;
+                    if selected || resp.hovered() {
+                        ui.painter().rect_filled(rect, CornerRadius::same(4), if selected { ACCENT.gamma_multiply(0.25) } else { p.card_hover });
+                    }
+                    let y = rect.center().y;
+                    ui.painter().text(egui::pos2(rect.left() + 8.0, y), egui::Align2::LEFT_CENTER, format!("{{{}}}", d.key), egui::FontId::monospace(13.0), p.text);
+                    ui.painter().text(egui::pos2(rect.left() + 120.0, y), egui::Align2::LEFT_CENTER, d.desc, egui::FontId::proportional(12.5), p.text);
+                    let sample = match d.key {
+                        "battery" => rule.battery.to_string(),
+                        "rn" => d.sample.to_string(),
+                        _ => sample_ctx.and_then(|c| c.value(d.key)).filter(|v| v != "—").unwrap_or_else(|| d.sample.to_string()),
+                    };
+                    ui.painter().text(egui::pos2(rect.right() - 8.0, y), egui::Align2::RIGHT_CENTER, format!("例: {sample}"), egui::FontId::proportional(12.0), p.sub);
+                    if selected && moved != 0 {
+                        ui.scroll_to_rect(rect, None);
+                    }
+                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        clicked = Some(i);
+                    }
+                }
+            });
+        });
+    });
+    comp.hovered = area.response.hovered() || area.response.contains_pointer();
+
+    // 決定: 入力中の部分を {key} に置き換え、カーソルをその後ろへ
+    if let Some(i) = clicked.or(enter.then_some(comp.selected)) {
+        if let Some(d) = list.get(i) {
+            let insert = format!("{{{}}}", d.key);
+            let mut end = cursor;
+            if has_brace && chars.get(end) == Some(&'}') {
+                end += 1;
+            }
+            rule.message = char_slice(&chars, 0, comp.start) + &insert + &char_slice(&chars, end, chars.len());
+            let pos = comp.start + insert.chars().count();
+            out.state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(pos))));
+            out.state.store(ui.ctx(), id);
+            ui.ctx().memory_mut(|m| m.request_focus(id));
+            changed = true;
+        }
+        *completion = None;
     }
     changed
 }
