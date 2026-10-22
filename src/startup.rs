@@ -27,8 +27,8 @@ pub fn set(enable: bool) {
     };
     let label = if enable { "オン" } else { "オフ" };
     if result.is_ok() {
-        crate::log::info(format!("Windows 起動時に開始: {label}"));
+        crate::log::info("I010", format!("Windows 起動時に開始: {label}"));
     } else {
-        crate::log::error(format!("Windows 起動時に開始を{label}にできませんでした: {}", result.to_hresult().message()));
+        crate::log::error("E006", format!("Windows 起動時に開始を{label}にできませんでした: {}", result.to_hresult().message()));
     }
 }

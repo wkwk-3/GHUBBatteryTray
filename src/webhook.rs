@@ -37,8 +37,8 @@ pub fn send_if_enabled(settings: &Settings, m: Message) {
     std::thread::spawn(move || {
         // URL にはトークンが含まれるのでログに書かない
         match send(&url, format, &m) {
-            Ok(code) => crate::log::info(format!("Webhook を送信しました ({}, HTTP {code})", m.event)),
-            Err(e) => crate::log::error(format!("Webhook の送信に失敗しました ({}): {e}", m.event)),
+            Ok(code) => crate::log::info("I037", format!("Webhook を送信しました ({}, HTTP {code})", m.event)),
+            Err(e) => crate::log::error("E015", format!("Webhook の送信に失敗しました ({}): {e}", m.event)),
         }
     });
 }
@@ -46,7 +46,7 @@ pub fn send_if_enabled(settings: &Settings, m: Message) {
 /// 同期で送る。HTTP ステータスが 2xx 以外ならエラー
 pub fn send(url: &str, format: WebhookFormat, m: &Message) -> Result<u16, String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("URL は http:// または https:// で始めてください".into());
+        return Err(crate::i18n::t().err_url_scheme.into());
     }
     let mut child = Command::new("curl.exe")
         .args(["-s", "-o", "NUL", "-w", "%{http_code}", "-m", "10", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", url])
@@ -55,10 +55,10 @@ pub fn send(url: &str, format: WebhookFormat, m: &Message) -> Result<u16, String
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .map_err(|e| format!("curl.exe を起動できません: {e}"))?;
+        .map_err(|e| crate::i18n::f(crate::i18n::t().err_curl_fmt, &[&e]))?;
 
     child.stdin.take().ok_or("stdin")?.write_all(payload(format, m).as_bytes()).map_err(|e| e.to_string())?;
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let code: u16 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
-    if (200..300).contains(&code) { Ok(code) } else if code == 0 { Err("接続できませんでした".into()) } else { Err(format!("HTTP {code}")) }
+    if (200..300).contains(&code) { Ok(code) } else if code == 0 { Err(crate::i18n::t().err_connect.into()) } else { Err(format!("HTTP {code}")) }
 }

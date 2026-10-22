@@ -16,7 +16,7 @@ pub struct Rule {
 
 impl Default for Rule {
     fn default() -> Self {
-        Rule { enabled: true, battery: 20, message: "{name} のバッテリー残量が {battery}% を下回りました".into(), balloon_tip_icon: 2 }
+        Rule { enabled: true, battery: 20, message: crate::i18n::t().default_rule_message.into(), balloon_tip_icon: 2 }
     }
 }
 
@@ -45,6 +45,8 @@ pub struct Settings {
     pub check_updates: bool,
     /// フルスクリーン中は Windows の通知をためておき、終わったらまとめて出す
     pub defer_in_fullscreen: bool,
+    /// 表示言語 (System = Windows の表示言語)
+    pub language: crate::i18n::Language,
 }
 
 /// 残量 max_percent % 以下ならこの色
@@ -127,10 +129,11 @@ impl Theme {
     }
 
     pub fn label(self) -> &'static str {
+        let t = crate::i18n::t();
         match self {
-            Theme::System => "システム",
-            Theme::Light => "ライト",
-            Theme::Dark => "ダーク",
+            Theme::System => t.theme_system,
+            Theme::Light => t.theme_light,
+            Theme::Dark => t.theme_dark,
         }
     }
 
@@ -180,6 +183,7 @@ impl Default for Settings {
             level_colors: LevelColors::default(),
             check_updates: true,
             defer_in_fullscreen: true,
+            language: crate::i18n::Language::System,
         }
     }
 }
@@ -208,20 +212,20 @@ impl Settings {
         let mut s: Settings = match std::fs::read_to_string(path()) {
             Ok(t) => match serde_json::from_str(t.trim_start_matches('\u{feff}')) {
                 Ok(s) => {
-                    crate::log::problem("settings", None, "設定ファイルを読み込めるようになりました");
+                    crate::log::problem("settings", None, ("I009", "設定ファイルを読み込めるようになりました"));
                     s
                 }
                 Err(e) => {
                     // このまま保存すると初期設定で上書きされるので、壊れた内容を残しておく
                     let kept = std::fs::copy(path(), path().with_extension("json.broken")).is_ok();
                     let note = if kept { " (元の内容は settings.json.broken に保存)" } else { "" };
-                    crate::log::problem("settings", Some(format!("設定ファイルを読み込めないため初期設定を使います: {e}{note}")), "");
+                    crate::log::problem("settings", Some(("W007", format!("設定ファイルを読み込めないため初期設定を使います: {e}{note}"))), ("", ""));
                     Settings::default()
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
             Err(e) => {
-                crate::log::problem("settings", Some(format!("設定ファイルを開けないため初期設定を使います: {e}")), "");
+                crate::log::problem("settings", Some(("W008", format!("設定ファイルを開けないため初期設定を使います: {e}"))), ("", ""));
                 Settings::default()
             }
         };
@@ -236,6 +240,7 @@ impl Settings {
             let old = std::mem::take(&mut s.notifications);
             s.device_notifications.entry(s.selected_device.clone()).or_insert(old);
         }
+        crate::i18n::set(s.language);
         s
     }
 

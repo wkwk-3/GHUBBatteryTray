@@ -38,20 +38,23 @@ impl Battery {
 
     /// "65%  ·  残り約12時間" のような状態表示
     pub fn status(&self) -> String {
+        use crate::i18n::{f, t};
+        let t = t();
         if !self.connected {
-            return "未接続".into();
+            return t.disconnected.into();
         }
-        let mut s = format!("{}%", self.percentage);
+        let mut s = crate::i18n::pct(self.percentage);
         if self.asleep {
-            s += " / スリープ中";
+            s += &format!(" / {}", t.asleep);
         } else if self.charging {
-            s += if self.fully_charged { " / 充電完了" } else { " / 充電中" };
+            s += &format!(" / {}", if self.fully_charged { t.fully_charged } else { t.charging });
         } else if let Some(h) = self.remaining_hours {
-            s += &if h >= 1.0 { format!(" / 残り約{:.0}時間", h) } else { format!(" / 残り約{:.0}分", h * 60.0) };
+            let about = f(t.about_fmt, &[&crate::placeholders::duration_text((h * 3600.0) as u64)]);
+            s += &format!(" / {}", f(t.remaining_fmt, &[&about]));
         }
         if !self.charging && !self.asleep {
             if let Some(mw) = self.power_mw {
-                s += &format!(" / 放電量 {mw:.1} mW");
+                s += &format!(" / {}", f(t.power_fmt, &[&crate::i18n::dec(mw, 1)]));
             }
         }
         s
@@ -69,7 +72,7 @@ pub enum Source {
 impl Source {
     pub fn label(self) -> &'static str {
         match self {
-            Source::Hid => "直接通信",
+            Source::Hid => crate::i18n::t().source_hid,
             Source::Agent => "G HUB API",
             Source::SettingsDb => "settings.db",
         }
@@ -203,13 +206,13 @@ pub fn fetch_agent() -> Option<Vec<Battery>> {
     let result = Agent::connect().and_then(|mut agent| agent.refresh_all().map(|_| agent.batteries()));
     match result {
         Ok(list) => {
-            crate::log::problem("ghub", None, "G HUB API に接続しました");
-            crate::log::debug(format!("G HUB API: {} 台", list.len()));
+            crate::log::problem("ghub", None, ("I003", "G HUB API に接続しました"));
+            crate::log::debug("D001", format!("G HUB API: {} 台", list.len()));
             Some(list)
         }
         Err(e) => {
             // G HUB を入れていない環境では毎回失敗するので、内容が変わったときだけ書く
-            crate::log::problem("ghub", Some(format!("G HUB API を使えません: {e}")), "");
+            crate::log::problem("ghub", Some(("W001", format!("G HUB API を使えません: {e}"))), ("", ""));
             None
         }
     }

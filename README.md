@@ -285,16 +285,97 @@ Webhook の有効 / 無効は、タスクトレイアイコンの右クリック
 ログは次の形式で、起動・終了、起動時の環境と設定の概要、デバイスの検出、取得元の切り替え、充電の開始 / 終了、スリープ、通知、Webhook の送信結果、設定の保存、各処理の失敗とその理由、異常終了の場所などを記録します。同じ失敗が続く場合は、内容が変わったときと回復したときだけ記録します。Webhook の URL はログに書きません。
 
 ```text
-2026-10-22 12:46:04.064 +09:00 [INFO] アプリを開始しました (バージョン 2.4.0)
-2026-10-22 12:46:04.065 +09:00 [INFO] 環境: Windows 11 Pro 26H2 (ビルド 26300.9711) / 表示倍率 100% / exe ... / 設定フォルダー ... / 起動オプション なし
-2026-10-22 12:46:04.065 +09:00 [INFO] 設定: テーマ システム / アイコン表示 1 台 / 通知ルール 3 件 (1 台) / フルスクリーン中の保留 オン / 更新確認 オン / Webhook オフ / Windows 起動時に開始 オン / 詳細ログ オフ
-2026-10-22 12:46:05.304 +09:00 [INFO] HID 直接通信で見つかったデバイス: PRO 2 LIGHTSPEED (番号 1, 機能 0x1004)
-2026-10-22 12:46:05.728 +09:00 [INFO] デバイスを検出: PRO 2 LIGHTSPEED 24% (取得元: G HUB API)
+2026-10-22 12:46:04.064 +09:00 [INFO] I011 アプリを開始しました (バージョン 2.4.0)
+2026-10-22 12:46:04.065 +09:00 [INFO] I001 環境: Windows 11 Pro 26H2 (ビルド 26300.9711) / 表示倍率 100% / exe ... / 設定フォルダー ... / 起動オプション なし
+2026-10-22 12:46:04.065 +09:00 [INFO] I002 設定: テーマ System / アイコン表示 1 台 / 通知ルール 3 件 (1 台) / フルスクリーン中の保留 オン / 更新確認 オン / Webhook オフ / Windows 起動時に開始 オン / 詳細ログ オフ
+2026-10-22 12:46:05.304 +09:00 [INFO] I005 HID 直接通信で見つかったデバイス: PRO 2 LIGHTSPEED (番号 1, 機能 0x1004)
+2026-10-22 12:46:05.728 +09:00 [INFO] I013 デバイスを検出: PRO 2 LIGHTSPEED 24% (取得元: G HUB API)
 ```
 
 環境変数 `GHBT_DEBUG=1` を付けて起動すると、毎回の取得結果や通知ルールの判定などの詳細 (DEBUG) も記録します。
 
 `settings.json` が壊れていて読み込めない場合は、初期設定で起動し、元の内容を `settings.json.broken` に残します。
+
+### ログ ID
+
+各行のレベルの後ろに、出力した箇所を表す ID (エラー `E`・警告 `W`・情報 `I`・詳細 `D` + 3 桁の番号) が付きます。問い合わせの際は ID を添えてもらうと、どの処理で起きたかがすぐに分かります。
+
+| ID | 内容 | 出力元 |
+| --- | --- | --- |
+| E001 | 異常終了しました ({場所}, スレッド {名前}): {内容} | `log.rs` |
+| E002 | health.csv に書き込めませんでした: {e} | `health.rs` |
+| E003 | HID の初期化に失敗しました。直接通信は使えません: {e} | `hidpp.rs` |
+| E004 | exe のハッシュ値が GitHub の {tag} と一致しません。起動を中止します (GitHub: {expected} / この exe: {actual}) | `main.rs` |
+| E005 | aliases.json を保存できませんでした: {e} | `sources.rs` |
+| E006 | Windows 起動時に開始を{label}にできませんでした: {値} | `startup.rs` |
+| E007 | トレイアイコンを登録できませんでした (番号 {uid}): {値} | `tray.rs` |
+| E008 | 設定の保存に失敗しました: {e} | `tray.rs` |
+| E009 | 設定画面を開けませんでした: {e} | `ui.rs` |
+| E010 | 設定の保存に失敗しました: {e} | `ui.rs` |
+| E011 | 設定の保存に失敗しました: {e} | `ui.rs` |
+| E012 | 設定の保存に失敗しました: {e} | `ui.rs` |
+| E013 | Webhook のテスト送信に失敗しました: {e} | `ui.rs` |
+| E014 | 更新に失敗しました: {e} | `ui.rs` |
+| E015 | Webhook の送信に失敗しました ({値}): {e} | `webhook.rs` |
+| W001 | G HUB API を使えません: {e} | `ghub.rs` |
+| W002 | HID デバイスの一覧を取得できません: {e} | `hidpp.rs` |
+| W003 | history.csv に書き込めません: {e} | `history.rs` |
+| W004 | history.csv の古い行を消せませんでした: {e} | `history.rs` |
+| W005 | 更新前のアプリが終了しないため、起動を中止しました | `main.rs` |
+| W006 | exe のハッシュ値を確認できませんでした ({reason})。起動を続けます | `main.rs` |
+| W007 | 設定ファイルを読み込めないため初期設定を使います: {e}{note} | `settings.rs` |
+| W008 | 設定ファイルを開けないため初期設定を使います: {e} | `settings.rs` |
+| W009 | G HUB の settings.db を読めません: {e} | `sources.rs` |
+| W010 | バッテリー情報を取得できませんでした (直接通信・G HUB API・settings.db すべて) | `tray.rs` |
+| W011 | 更新の確認に失敗しました: {e} | `tray.rs` |
+| W012 | 更新の確認に失敗しました: {e} | `ui.rs` |
+| I001 | 環境: {値} / 表示倍率 {値}% / exe {値} / 設定フォルダー {値} / 起動オプション {値} | `envinfo.rs` |
+| I002 | 設定: テーマ {値} / アイコン表示 {値} 台 / 通知ルール {値} 件 ({値} 台) / フルスクリーン中の保留 {値} / 更新確認 {値} / Webhook {値} / Windows 起動時に開始 {値} / 詳細ログ {値} | `envinfo.rs` |
+| I003 | G HUB API に接続しました | `ghub.rs` |
+| I004 | HID デバイスの一覧を取得できるようになりました | `hidpp.rs` |
+| I005 | HID 直接通信で見つかったデバイス: {found} | `hidpp.rs` |
+| I006 | history.csv に書き込めるようになりました | `history.rs` |
+| I007 | 放電の記録を追加: {device} {値}% → {値}% / {値} 時間 (満充電時の使用可能時間 約{値} 時間) | `history.rs` |
+| I008 | exe のハッシュ値が GitHub の v{値} と一致しました | `main.rs` |
+| I009 | 設定ファイルを読み込めるようになりました | `settings.rs` |
+| I010 | Windows 起動時に開始: {label} | `startup.rs` |
+| I011 | アプリを開始しました (バージョン {値}) | `tray.rs` |
+| I012 | アプリを終了しました | `tray.rs` |
+| I013 | デバイスを検出: {デバイス} {残量}% (取得元: {取得元}) | `tray.rs` |
+| I014 | 取得元が変わりました: {デバイス} {前} → {後} | `tray.rs` |
+| I015 | {デバイス}: 充電を開始 / 充電を終了 ({残量}%) | `tray.rs` |
+| I016 | {デバイス}: スリープ中 (前回の値を表示) / スリープから復帰 | `tray.rs` |
+| I017 | {デバイス}: 接続 / 未接続 | `tray.rs` |
+| I018 | デバイスが切断されました: {デバイス} | `tray.rs` |
+| I019 | 設定を読み込み直しました | `tray.rs` |
+| I020 | フルスクリーン中のため通知を保留: {title} / {値} | `tray.rs` |
+| I021 | フルスクリーン終了。保留中の通知を表示 ({値} 件) | `tray.rs` |
+| I022 | 通知: {title} / {値} | `tray.rs` |
+| I023 | メニューから終了が選ばれました | `tray.rs` |
+| I024 | Webhook 通知: {値} | `tray.rs` |
+| I025 | テーマ: {値} | `tray.rs` |
+| I026 | アイコン表示: {デバイス} を表示 / 非表示 | `tray.rs` |
+| I027 | 更新のため終了します | `tray.rs` |
+| I028 | 設定画面を開きました | `ui.rs` |
+| I029 | 設定を保存しました | `ui.rs` |
+| I030 | テーマ: {値} | `ui.rs` |
+| I031 | 言語: {設定} ({実際の言語}) | `ui.rs` |
+| I032 | Webhook のテスト送信に成功しました (HTTP {code}) | `ui.rs` |
+| I033 | 更新を確認しました: 最新 {値} / 現在 v{CURRENT}{値} | `updater.rs` |
+| I034 | 更新前の exe を削除しました | `updater.rs` |
+| I035 | {値} への更新を開始します | `updater.rs` |
+| I036 | {値} に入れ替えました。再起動します | `updater.rs` |
+| I037 | Webhook を送信しました ({値}, HTTP {code}) | `webhook.rs` |
+| D001 | G HUB API: {値} 台 | `ghub.rs` |
+| D002 | HID: {値} を開けません: {e} | `hidpp.rs` |
+| D003 | HID: {値} から応答がありません | `hidpp.rs` |
+| D004 | HID: {値} を開けません: {e} | `hidpp.rs` |
+| D005 | HID: 番号 {index} はバッテリー機能に対応していません | `hidpp.rs` |
+| D006 | 取得結果: {値} | `tray.rs` |
+| D007 | 通知ルールなし: {値} ({値}) | `tray.rs` |
+| D008 | 通知済みのため送りません: {値} {値}% (しきい値 {値}%) | `tray.rs` |
+
+ID は箇所ごとに固定です。新しくログを追加するときは、各レベルの最後の番号の次を使ってください (重複はテスト `log_ids_are_unique` で検出します)。
 
 ## トラブルシューティング
 
@@ -385,3 +466,35 @@ cargo test --release -- --ignored   # 実機テスト (無線マウスがスリ�
 
 > [!NOTE]
 > 開発中に Release ビルドを動かすと、同じバージョンのリリースとハッシュ値が一致せず起動しません。Debug ビルドは確認しません。Release ビルドで試すときは、環境変数 `GHBT_SKIP_INTEGRITY=1` を付けて起動するか、まだリリースしていないバージョン番号にしてください。
+
+## サードパーティのライセンス
+
+### Bootstrap Icons (Discord アイコン)
+
+設定画面左下の Discord アイコン (`assets/discord.svg`、それを画像化した `assets/discord_mask.bin`) は [Bootstrap Icons](https://icons.getbootstrap.com/) の `discord` アイコンを使用しています。
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2019-2024 The Bootstrap Authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+Discord の名称とロゴは Discord Inc. の商標です。

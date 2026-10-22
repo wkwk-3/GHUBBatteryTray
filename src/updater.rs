@@ -5,6 +5,7 @@
 //!   (digest) と比べる。一致しなければ起動しない
 //! 通信は Webhook と同じく Windows 標準の curl.exe を使う (アプリ本体に TLS を持たない)。
 
+use crate::i18n::{f, t};
 use crate::{log, settings};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -98,18 +99,18 @@ fn curl_with_timeout(seconds: u32, args: &[&str]) -> Result<Vec<u8>, String> {
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map_err(|e| format!("curl.exe を起動できません: {e}"))?;
+        .map_err(|e| f(t().err_curl_fmt, &[&e]))?;
     if out.status.success() {
         Ok(out.stdout)
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(if err.contains("404") { "リリースが見つかりません".into() } else if err.is_empty() { "通信に失敗しました".into() } else { err })
+        Err(if err.contains("404") { t().err_release_not_found.into() } else if err.is_empty() { t().err_network.into() } else { err })
     }
 }
 
 /// GitHub のリリース情報 (JSON) を読む
 pub fn parse_release(json: &serde_json::Value) -> Result<Release, String> {
-    let tag = json["tag_name"].as_str().ok_or("リリース情報にタグがありません")?.to_string();
+    let tag = json["tag_name"].as_str().ok_or(t().err_no_tag)?.to_string();
     let notes = json["body"].as_str().unwrap_or_default().to_string();
     let exe = json["assets"]
         .as_array()
@@ -117,14 +118,14 @@ pub fn parse_release(json: &serde_json::Value) -> Result<Release, String> {
         .flatten()
         .filter(|a| a["name"].as_str().is_some_and(|n| n.to_ascii_lowercase().ends_with(".exe")))
         .max_by_key(|a| a["name"].as_str() == Some("GHUBBatteryTray.exe"))
-        .ok_or("リリースに exe が添付されていません")?;
+        .ok_or(t().err_no_exe)?;
     // GitHub がリリース時に付けるハッシュ値 ("sha256:...")。無ければリリースノートの "SHA256: ..."
     let digest = exe["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).filter(|h| h.len() == 64).map(|h| h.to_ascii_lowercase());
     Ok(Release {
         sha256: digest.or_else(|| find_sha256(&notes)),
         tag,
         page_url: json["html_url"].as_str().unwrap_or_default().to_string(),
-        exe_url: exe["browser_download_url"].as_str().ok_or("ダウンロード URL がありません")?.to_string(),
+        exe_url: exe["browser_download_url"].as_str().ok_or(t().err_no_url)?.to_string(),
         exe_size: exe["size"].as_u64().unwrap_or(0),
         notes,
     })
@@ -191,7 +192,7 @@ pub fn verify_self() -> Integrity {
         Err(e) => return Integrity::Unverified(e),
     };
     let fetched = curl_with_timeout(10, &[&releases_url()])
-        .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).map_err(|e| format!("リリース一覧を読めません: {e}")));
+        .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).map_err(|e| f(t().err_read_releases_fmt, &[&e])));
     let mut state = State::load();
     let result = judge(&actual, fetched, CURRENT, &state.verified_hash);
     if result == Integrity::Verified && state.verified_hash != actual {
@@ -204,11 +205,11 @@ pub fn verify_self() -> Integrity {
 /// 最新リリースを確認し、結果を保存する
 pub fn check() -> Result<State, String> {
     let body = curl(&[&api_url()])?;
-    let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| format!("リリース情報を読めません: {e}"))?;
+    let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| f(t().err_read_releases_fmt, &[&e]))?;
     let release = parse_release(&json)?;
     let mut state = State::load();
     state.last_check = crate::history::now();
-    log::info(format!("更新を確認しました: 最新 {} / 現在 v{CURRENT}{}", release.tag, if release.is_newer() { " (更新あり)" } else { "" }));
+    log::info("I033", format!("更新を確認しました: 最新 {} / 現在 v{CURRENT}{}", release.tag, if release.is_newer() { " (更新あり)" } else { "" }));
     state.latest = Some(release);
     state.save();
     Ok(state)
@@ -227,17 +228,17 @@ pub fn download(release: &Release) -> Result<PathBuf, String> {
 
 /// サイズ・exe の形式・(あれば) SHA-256 を確かめる
 pub fn verify(file: &Path, release: &Release) -> Result<(), String> {
-    let bytes = std::fs::read(file).map_err(|e| format!("ダウンロードしたファイルを読めません: {e}"))?;
+    let bytes = std::fs::read(file).map_err(|e| f(t().err_read_download_fmt, &[&e]))?;
     if release.exe_size > 0 && bytes.len() as u64 != release.exe_size {
-        return Err(format!("ファイルサイズが一致しません ({} / {} バイト)", bytes.len(), release.exe_size));
+        return Err(f(t().err_size_fmt, &[&bytes.len(), &release.exe_size]));
     }
     if !bytes.starts_with(b"MZ") {
-        return Err("ダウンロードしたファイルが exe ではありません".into());
+        return Err(t().err_not_exe.into());
     }
     if let Some(expected) = &release.sha256 {
         let actual: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
         if &actual != expected {
-            return Err("SHA-256 が一致しません (破損または改ざんの可能性があります)".into());
+            return Err(t().err_sha.into());
         }
     }
     Ok(())
@@ -247,11 +248,11 @@ pub fn verify(file: &Path, release: &Release) -> Result<(), String> {
 pub fn install(new_exe: &Path, current: &Path) -> Result<(), String> {
     let old = old_path(current);
     let _ = std::fs::remove_file(&old);
-    std::fs::rename(current, &old).map_err(|e| format!("今の exe を入れ替えられません (書き込み権限を確認してください): {e}"))?;
+    std::fs::rename(current, &old).map_err(|e| f(t().err_replace_fmt, &[&e]))?;
     if let Err(e) = std::fs::copy(new_exe, current) {
         let _ = std::fs::remove_file(current);
         let _ = std::fs::rename(&old, current);
-        return Err(format!("新しい exe を置けませんでした: {e}"));
+        return Err(f(t().err_place_fmt, &[&e]));
     }
     let _ = std::fs::remove_file(new_exe);
     Ok(())
@@ -268,21 +269,21 @@ pub fn cleanup_old() {
     if let Ok(exe) = std::env::current_exe() {
         let old = old_path(&exe);
         if old.exists() && std::fs::remove_file(&old).is_ok() {
-            log::info("更新前の exe を削除しました");
+            log::info("I034", "更新前の exe を削除しました");
         }
     }
 }
 
 /// 更新を最後まで行う: ダウンロード → 入れ替え → 常駐を終了 → 新しい exe を起動
 pub fn update_and_restart(release: &Release) -> Result<(), String> {
-    log::info(format!("{} への更新を開始します", release.tag));
+    log::info("I035", format!("{} への更新を開始します", release.tag));
     let file = download(release)?;
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
     install(&file, &current)?;
-    log::info(format!("{} に入れ替えました。再起動します", release.tag));
+    log::info("I036", format!("{} に入れ替えました。再起動します", release.tag));
 
     crate::tray::request_quit();
-    Command::new(&current).arg("--after-update").spawn().map_err(|e| format!("新しいバージョンを起動できません: {e}"))?;
+    Command::new(&current).arg("--after-update").spawn().map_err(|e| f(t().err_launch_fmt, &[&e]))?;
     Ok(())
 }
 

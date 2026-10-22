@@ -159,7 +159,7 @@ impl Reader {
         let api = match HidApi::new_without_enumerate() {
             Ok(api) => Some(api),
             Err(e) => {
-                crate::log::error(format!("HID の初期化に失敗しました。直接通信は使えません: {e}"));
+                crate::log::error("E003", format!("HID の初期化に失敗しました。直接通信は使えません: {e}"));
                 None
             }
         };
@@ -180,12 +180,12 @@ impl Reader {
             let reading = match api.open_path(&k.path) {
                 Ok(dev) => Channel { dev: &dev, index: k.index }.battery(k.feature),
                 Err(e) => {
-                    crate::log::debug(format!("HID: {} を開けません: {e}", k.name));
+                    crate::log::debug("D002", format!("HID: {} を開けません: {e}", k.name));
                     None
                 }
             };
             if reading.is_none() {
-                crate::log::debug(format!("HID: {} から応答がありません", k.name));
+                crate::log::debug("D003", format!("HID: {} から応答がありません", k.name));
             }
             match reading {
                 Some((percentage, charging, full)) => {
@@ -229,10 +229,10 @@ impl Reader {
         let previous: Vec<Known> = std::mem::take(&mut self.known);
         let Some(api) = self.api.as_mut() else { return };
         if let Err(e) = api.reset_devices().and_then(|_| api.add_devices(VENDOR_LOGITECH, 0)) {
-            crate::log::problem("hid_scan", Some(format!("HID デバイスの一覧を取得できません: {e}")), "");
+            crate::log::problem("hid_scan", Some(("W002", format!("HID デバイスの一覧を取得できません: {e}"))), ("", ""));
             return;
         }
-        crate::log::problem("hid_scan", None, "HID デバイスの一覧を取得できるようになりました");
+        crate::log::problem("hid_scan", None, ("I004", "HID デバイスの一覧を取得できるようになりました"));
 
         let paths: Vec<_> = api
             .device_list()
@@ -244,7 +244,7 @@ impl Reader {
             let dev = match api.open_path(&path) {
                 Ok(dev) => dev,
                 Err(e) => {
-                    crate::log::debug(format!("HID: {} を開けません: {e}", path.to_string_lossy()));
+                    crate::log::debug("D004", format!("HID: {} を開けません: {e}", path.to_string_lossy()));
                     continue;
                 }
             };
@@ -259,7 +259,7 @@ impl Reader {
                     continue;
                 }
                 let Some(feature) = ch.battery_feature() else {
-                    crate::log::debug(format!("HID: 番号 {index} はバッテリー機能に対応していません"));
+                    crate::log::debug("D005", format!("HID: 番号 {index} はバッテリー機能に対応していません"));
                     continue;
                 };
                 let name = ch.name().unwrap_or_else(|| format!("Logitech device {index}"));
@@ -280,7 +280,7 @@ impl Reader {
         };
         if let Ok(mut last) = LAST.lock() {
             if last.as_deref() != Some(found.as_str()) {
-                crate::log::info(format!("HID 直接通信で見つかったデバイス: {found}"));
+                crate::log::info("I005", format!("HID 直接通信で見つかったデバイス: {found}"));
                 *last = Some(found);
             }
         }

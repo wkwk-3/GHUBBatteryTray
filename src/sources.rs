@@ -47,7 +47,7 @@ pub fn collect(reader: &mut Reader) -> Vec<Battery> {
     if aliases_changed {
         let saved = std::fs::create_dir_all(settings::dir()).and_then(|_| std::fs::write(aliases_path(), serde_json::to_string_pretty(&aliases).unwrap_or_default()));
         if let Err(e) = saved {
-            crate::log::error(format!("aliases.json を保存できませんでした: {e}"));
+            crate::log::error("E005", format!("aliases.json を保存できませんでした: {e}"));
         }
     }
 
@@ -61,11 +61,11 @@ pub fn collect(reader: &mut Reader) -> Vec<Battery> {
     if list.is_empty() {
         list = match ghub::read_settings_db() {
             Ok(list) => {
-                crate::log::problem("settings_db", None, "");
+                crate::log::problem("settings_db", None, ("", ""));
                 list
             }
             Err(e) => {
-                crate::log::problem("settings_db", Some(format!("G HUB の settings.db を読めません: {e}")), "");
+                crate::log::problem("settings_db", Some(("W009", format!("G HUB の settings.db を読めません: {e}"))), ("", ""));
                 Vec::new()
             }
         };

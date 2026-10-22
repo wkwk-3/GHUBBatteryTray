@@ -8,7 +8,7 @@ use windows::core::{HSTRING, w};
 pub fn log_startup(s: &Settings) {
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    crate::log::info(format!(
+    crate::log::info("I001", format!(
         "環境: {} / 表示倍率 {}% / exe {} / 設定フォルダー {} / 起動オプション {}",
         os_version(),
         unsafe { GetDpiForSystem() } * 100 / 96,
@@ -19,9 +19,9 @@ pub fn log_startup(s: &Settings) {
 
     let rules: usize = s.device_notifications.values().map(Vec::len).sum();
     let on = |b: bool| if b { "オン" } else { "オフ" };
-    crate::log::info(format!(
+    crate::log::info("I002", format!(
         "設定: テーマ {} / アイコン表示 {} 台 / 通知ルール {} 件 ({} 台) / フルスクリーン中の保留 {} / 更新確認 {} / Webhook {} / Windows 起動時に開始 {} / 詳細ログ {}",
-        s.theme.label(),
+        format!("{:?}", s.theme),
         s.tray_display_devices.len(),
         rules,
         s.device_notifications.len(),

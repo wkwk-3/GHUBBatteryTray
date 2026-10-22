@@ -3,39 +3,103 @@
 use crate::ghub::Battery;
 use crate::health::{self, Run};
 use crate::history::{self, Sample};
+use crate::i18n::{dec, f, pct, t};
 
-/// 置換文字の定義 (補完の一覧に出す)
+/// 置換文字の定義 (補完の一覧に出す)。説明と例は表示言語で
 pub struct Def {
     pub key: &'static str,
-    /// どういう値か
-    pub desc: &'static str,
-    /// 例 (実際の値が出せないときに見せる)
-    pub sample: &'static str,
 }
 
 /// アルファベット順
 pub const DEFS: &[Def] = &[
-    Def { key: "bar", desc: "残量のバー表示", sample: "■■□□□□□□□□" },
-    Def { key: "battery", desc: "通知のしきい値 (%)", sample: "20" },
-    Def { key: "cycles", desc: "充電サイクル", sample: "7.9回" },
-    Def { key: "empty_at", desc: "0% になる予測時刻", sample: "21:40ごろ" },
-    Def { key: "health", desc: "容量 (記録開始時比)", sample: "97%" },
-    Def { key: "name", desc: "デバイス名", sample: "PRO 2 LIGHTSPEED" },
-    Def { key: "now", desc: "現在の残量 (%)", sample: "18" },
-    Def { key: "pace", desc: "平均との比較 (消費ペース)", sample: "平均より速い" },
-    Def { key: "power", desc: "放電量", sample: "14.7 mW" },
-    Def { key: "rate", desc: "現在の消費ペース", sample: "-5.3%/時" },
-    Def { key: "remain", desc: "残り時間 (G HUB 起動時)", sample: "約3時間" },
-    Def { key: "replace", desc: "買い替えの目安", sample: "2027年6月ごろ" },
-    Def { key: "rn", desc: "改行", sample: "(改行)" },
-    Def { key: "since", desc: "最後に充電してからの時間", sample: "9時間" },
-    Def { key: "source", desc: "取得元", sample: "直接通信" },
-    Def { key: "streak", desc: "充電せずに使い続けた最長記録", sample: "3日" },
-    Def { key: "time", desc: "通知した時刻", sample: "18:05" },
+    Def { key: "bar" },
+    Def { key: "battery" },
+    Def { key: "cycles" },
+    Def { key: "empty_at" },
+    Def { key: "health" },
+    Def { key: "name" },
+    Def { key: "now" },
+    Def { key: "pace" },
+    Def { key: "power" },
+    Def { key: "rate" },
+    Def { key: "remain" },
+    Def { key: "replace" },
+    Def { key: "rn" },
+    Def { key: "since" },
+    Def { key: "source" },
+    Def { key: "streak" },
+    Def { key: "time" },
 ];
 
+impl Def {
+    /// どういう値か
+    pub fn desc(&self) -> &'static str {
+        let t = t();
+        match self.key {
+            "bar" => t.ph_bar,
+            "battery" => t.ph_battery,
+            "cycles" => t.ph_cycles,
+            "empty_at" => t.ph_empty_at,
+            "health" => t.ph_health,
+            "name" => t.ph_name,
+            "now" => t.ph_now,
+            "pace" => t.ph_pace,
+            "power" => t.ph_power,
+            "rate" => t.ph_rate,
+            "remain" => t.ph_remain,
+            "replace" => t.ph_replace,
+            "rn" => t.ph_rn,
+            "since" => t.ph_since,
+            "source" => t.ph_source,
+            "streak" => t.ph_streak,
+            "time" => t.ph_time,
+            _ => "",
+        }
+    }
+
+    /// 例 (実際の値が出せないときに見せる)
+    pub fn sample(&self) -> String {
+        let t = t();
+        // 例の時刻: 18:05 と 21:40 (UTC として作り、ずれ 0 で表示)
+        let (now, later) = (18 * 3600 + 5 * 60, 21 * 3600 + 40 * 60);
+        match self.key {
+            "bar" => bar_text(20),
+            "battery" => "20".into(),
+            "cycles" => f(t.cycles_fmt, &[&dec(7.9, 1)]),
+            "empty_at" => f(t.around_time_fmt, &[&clock_text(later, now, 0)]),
+            "health" => pct(97),
+            "name" => "PRO 2 LIGHTSPEED".into(),
+            "now" => "18".into(),
+            "pace" => t.pace_faster.into(),
+            "power" => format!("{} mW", dec(14.7, 1)),
+            "rate" => rate_text(5.3),
+            "remain" => f(t.about_fmt, &[&duration_text(3 * 3600)]),
+            "replace" => month_year_text(2027, 6),
+            "rn" => t.rn_sample.into(),
+            "since" => duration_text(9 * 3600),
+            "source" => t.source_hid.into(),
+            "streak" => duration_text(3 * 86400),
+            "time" => clock_text(now, now, 0),
+            _ => String::new(),
+        }
+    }
+}
+
 /// 値が分からないとき
-const UNKNOWN: &str = "不明";
+fn unknown() -> String {
+    t().unknown.to_string()
+}
+
+/// 「約2027年6月」などの年月
+pub fn month_year_text(y: i64, m: u32) -> String {
+    let t = t();
+    f(t.month_year_fmt, &[&y, &t.months[(m.clamp(1, 12) - 1) as usize]])
+}
+
+/// 消費ペース「-5.3%/時」
+pub fn rate_text(r: f64) -> String {
+    format!("-{}{}", dec(r, 1), t().per_hour)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pace {
@@ -115,33 +179,32 @@ impl Context {
 
     /// 1 つの置換文字の値。知らない名前なら None
     pub fn value(&self, key: &str) -> Option<String> {
-        let unknown = || UNKNOWN.to_string();
         Some(match key {
             "name" => self.name.clone(),
             "battery" => self.threshold.map(|v| v.to_string()).unwrap_or_else(unknown),
             "rn" => "\r\n".into(),
             "now" => self.now_pct.map(|v| v.to_string()).unwrap_or_else(unknown),
-            "remain" => self.remain_h.map(|h| format!("約{}", duration_text((h * 3600.0) as u64))).unwrap_or_else(unknown),
-            "empty_at" => self.empty_at.map(|t| format!("{}ごろ", clock_text(t, self.time, self.utc_offset))).unwrap_or_else(unknown),
-            "rate" => self.rate.map(|r| format!("-{r:.1}%/時")).unwrap_or_else(unknown),
-            "power" => self.power_mw.map(|p| format!("{p:.1} mW")).unwrap_or_else(unknown),
+            "remain" => self.remain_h.map(|h| f(t().about_fmt, &[&duration_text((h * 3600.0) as u64)])).unwrap_or_else(unknown),
+            "empty_at" => self.empty_at.map(|at| f(t().around_time_fmt, &[&clock_text(at, self.time, self.utc_offset)])).unwrap_or_else(unknown),
+            "rate" => self.rate.map(rate_text).unwrap_or_else(unknown),
+            "power" => self.power_mw.map(|p| format!("{} mW", dec(p, 1))).unwrap_or_else(unknown),
             "source" => self.source.map(str::to_string).unwrap_or_else(unknown),
             "time" => clock_text(self.time, self.time, self.utc_offset),
             "since" => self.since_secs.map(duration_text).unwrap_or_else(unknown),
-            "health" => self.health.map(|h| format!("{:.0}%", h * 100.0)).unwrap_or_else(unknown),
-            "cycles" => self.cycles.map(|c| format!("{c:.1}回")).unwrap_or_else(unknown),
+            "health" => self.health.map(|h| pct(format!("{:.0}", h * 100.0))).unwrap_or_else(unknown),
+            "cycles" => self.cycles.map(|c| f(t().cycles_fmt, &[&dec(c, 1)])).unwrap_or_else(unknown),
             "replace" => self
                 .replace_at
-                .map(|t| {
-                    let (y, m) = health::year_month(t);
-                    format!("{y}年{m}月ごろ")
+                .map(|at| {
+                    let (y, m) = health::year_month(at);
+                    month_year_text(y, m)
                 })
                 .unwrap_or_else(unknown),
             "bar" => self.now_pct.map(bar_text).unwrap_or_else(unknown),
             "pace" => match self.pace {
-                Some(Pace::Faster) => "平均より速い".into(),
-                Some(Pace::Usual) => "平均的".into(),
-                Some(Pace::Slower) => "平均より遅い".into(),
+                Some(Pace::Faster) => t().pace_faster.into(),
+                Some(Pace::Usual) => t().pace_usual.into(),
+                Some(Pace::Slower) => t().pace_slower.into(),
                 None => unknown(),
             },
             "streak" => self.streak_secs.map(duration_text).unwrap_or_else(unknown),
@@ -182,28 +245,36 @@ pub fn bar_text(pct: i32) -> String {
 /// 秒数を「45分 / 9時間 / 3日」に
 pub fn duration_text(secs: u64) -> String {
     let h = secs as f64 / 3600.0;
+    let t = t();
     if h < 1.0 {
-        format!("{}分", (secs / 60).max(1))
+        f(t.minutes_fmt, &[&(secs / 60).max(1)])
     } else if h < 48.0 {
-        format!("{:.0}時間", h)
+        f(t.hours_fmt, &[&format!("{h:.0}")])
     } else {
-        format!("{:.0}日", h / 24.0)
+        f(t.days_fmt, &[&format!("{:.0}", h / 24.0)])
     }
 }
 
 /// 時刻を「21:40」(今日)・「明日 6:10」・「10/25 21:40」に
-pub fn clock_text(t: u64, now: u64, utc_offset: i64) -> String {
+pub fn clock_text(at: u64, now: u64, utc_offset: i64) -> String {
     let local = |u: u64| u as i64 + utc_offset;
-    let (lt, ln) = (local(t), local(now));
+    let (lt, ln) = (local(at), local(now));
     let (day_t, day_n) = (lt.div_euclid(86400), ln.div_euclid(86400));
     let secs = lt.rem_euclid(86400);
-    let hm = format!("{}:{:02}", secs / 3600, secs % 3600 / 60);
+    let t = crate::i18n::t();
+    let (h, min) = (secs / 3600, secs % 3600 / 60);
+    let hm = if crate::i18n::style().clock_12h {
+        let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+        format!("{h12}:{min:02} {}", if h < 12 { t.am } else { t.pm })
+    } else {
+        format!("{h}:{min:02}")
+    };
     match day_t - day_n {
         0 => hm,
-        1 => format!("明日 {hm}"),
+        1 => f(t.tomorrow_fmt, &[&hm]),
         _ => {
             let (_, m, d) = health::ymd(lt.max(0) as u64);
-            format!("{m}/{d} {hm}")
+            format!("{} {hm}", f(t.date_md_fmt, &[&m, &d]))
         }
     }
 }
@@ -218,7 +289,7 @@ pub fn candidates(query: &str) -> Vec<&'static Def> {
                 0
             } else if d.key.contains(&q) {
                 1
-            } else if d.desc.contains(query) {
+            } else if d.desc().contains(query) {
                 2
             } else if is_subsequence(&q, d.key) {
                 3

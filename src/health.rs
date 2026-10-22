@@ -54,7 +54,7 @@ pub fn append(path: &Path, device: &str, run: &Run) {
         .open(path)
         .and_then(|mut f| writeln!(f, "{},{},{},{},{:.3},{}", run.end, device, run.start_pct, run.end_pct, run.hours, power));
     if let Err(e) = written {
-        crate::log::error(format!("health.csv に書き込めませんでした: {e}"));
+        crate::log::error("E002", format!("health.csv に書き込めませんでした: {e}"));
     }
 }
 

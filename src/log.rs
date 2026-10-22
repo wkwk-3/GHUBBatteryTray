@@ -1,5 +1,6 @@
 //! ログ (%LOCALAPPDATA%\GHUBBatteryTray\logs\GHUBBatteryTray.log)。
-//! 1 行 = "2026-10-22 01:20:00.123 +09:00 [INFO] メッセージ"。1 MB を超えたら .log.old に移して書き直す。
+//! 1 行 = "2026-10-22 01:20:00.123 +09:00 [INFO] I001 メッセージ"。1 MB を超えたら .log.old に移して書き直す。
+//! ID はレベルの頭文字 (E/W/I/D) + 番号。同じ ID は同じ箇所から出る (一覧は README)。新しく足すときは各レベルの最後の番号の次を使う。
 //! Webhook の URL などの秘密はログに書かないこと。
 
 use std::io::Write;
@@ -10,22 +11,22 @@ use windows::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION
 const MAX_BYTES: u64 = 1024 * 1024;
 static LOCK: Mutex<()> = Mutex::new(());
 
-pub fn info(message: impl AsRef<str>) {
-    write("INFO", message.as_ref());
+pub fn info(id: &str, message: impl AsRef<str>) {
+    write("INFO", id, message.as_ref());
 }
 
-pub fn warn(message: impl AsRef<str>) {
-    write("WARN", message.as_ref());
+pub fn warn(id: &str, message: impl AsRef<str>) {
+    write("WARN", id, message.as_ref());
 }
 
-pub fn error(message: impl AsRef<str>) {
-    write("ERROR", message.as_ref());
+pub fn error(id: &str, message: impl AsRef<str>) {
+    write("ERROR", id, message.as_ref());
 }
 
 /// 詳細ログ。環境変数 GHBT_DEBUG=1 のときだけ書く
-pub fn debug(message: impl AsRef<str>) {
+pub fn debug(id: &str, message: impl AsRef<str>) {
     if debug_enabled() {
-        write("DEBUG", message.as_ref());
+        write("DEBUG", id, message.as_ref());
     }
 }
 
@@ -35,24 +36,25 @@ pub fn debug_enabled() -> bool {
 }
 
 /// 毎回起きる失敗を 1 回だけ書く。key ごとに、内容が変わったら WARN、直ったら INFO
-pub fn problem(key: &str, problem: Option<String>, recovered: &str) {
+/// problem = (WARN の ID, 内容)、recovered = (INFO の ID, 内容)。内容が空なら直っても書かない
+pub fn problem(key: &str, problem: Option<(&str, String)>, recovered: (&str, &str)) {
     static LAST: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
     let Ok(mut last) = LAST.lock() else { return };
     let pos = last.iter().position(|(k, _)| k == key);
     match (problem, pos) {
-        (Some(p), Some(i)) if last[i].1 == p => {}
-        (Some(p), Some(i)) => {
-            warn(&p);
+        (Some((_, p)), Some(i)) if last[i].1 == p => {}
+        (Some((id, p)), Some(i)) => {
+            warn(id, &p);
             last[i].1 = p;
         }
-        (Some(p), None) => {
-            warn(&p);
+        (Some((id, p)), None) => {
+            warn(id, &p);
             last.push((key.into(), p));
         }
         (None, Some(i)) => {
             last.remove(i);
-            if !recovered.is_empty() {
-                info(recovered);
+            if !recovered.1.is_empty() {
+                info(recovered.0, recovered.1);
             }
         }
         (None, None) => {}
@@ -70,7 +72,7 @@ pub fn install_panic_hook() {
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_default();
         let thread = std::thread::current().name().unwrap_or("?").to_string();
-        error(format!("異常終了しました ({place}, スレッド {thread}): {text}"));
+        error("E001", format!("異常終了しました ({place}, スレッド {thread}): {text}"));
     }));
 }
 
@@ -121,7 +123,7 @@ fn timestamp() -> String {
     }
 }
 
-fn write(level: &str, message: &str) {
+fn write(level: &str, id: &str, message: &str) {
     let _guard = LOCK.lock();
     let path = path();
     static MIGRATED: std::sync::Once = std::sync::Once::new();
@@ -131,6 +133,6 @@ fn write(level: &str, message: &str) {
         let _ = std::fs::rename(&path, path.with_extension("log.old"));
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{} [{level}] {message}", timestamp());
+        let _ = writeln!(f, "{} [{level}] {id} {message}", timestamp());
     }
 }

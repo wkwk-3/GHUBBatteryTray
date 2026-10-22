@@ -6,6 +6,7 @@ mod ghub;
 mod hidpp;
 mod health;
 mod history;
+mod i18n;
 mod icon;
 mod log;
 mod placeholders;
@@ -43,12 +44,15 @@ fn main() {
         tries -= 1;
         if tries == 0 {
             if after_update {
-                log::warn("更新前のアプリが終了しないため、起動を中止しました");
+                log::warn("W005", "更新前のアプリが終了しないため、起動を中止しました");
             }
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
+
+    // 表示言語を設定から決める (読み込むと反映される)
+    let _ = settings::Settings::load();
 
     if !settings_mode && !integrity_ok() {
         return;
@@ -65,24 +69,19 @@ fn integrity_ok() -> bool {
     }
     match updater::verify_self() {
         updater::Integrity::Verified => {
-            log::info(format!("exe のハッシュ値が GitHub の v{} と一致しました", updater::CURRENT));
+            log::info("I008", format!("exe のハッシュ値が GitHub の v{} と一致しました", updater::CURRENT));
             true
         }
         updater::Integrity::Unverified(reason) => {
-            log::warn(format!("exe のハッシュ値を確認できませんでした ({reason})。起動を続けます"));
+            log::warn("W006", format!("exe のハッシュ値を確認できませんでした ({reason})。起動を続けます"));
             true
         }
         updater::Integrity::Mismatch { tag, expected, actual, page_url } => {
-            log::error(format!("exe のハッシュ値が GitHub の {tag} と一致しません。起動を中止します (GitHub: {expected} / この exe: {actual})"));
+            log::error("E004", format!("exe のハッシュ値が GitHub の {tag} と一致しません。起動を中止します (GitHub: {expected} / この exe: {actual})"));
             use windows::Win32::UI::WindowsAndMessaging::*;
-            let text = HSTRING::from(format!(
-                "この GHUBBatteryTray.exe (v{}) は、GitHub で公開されている {tag} のファイルと一致しないため、起動を中止しました。\n\
-                 リリースページから再ダウンロードしてください。\n\n\
-                 GitHub: {expected}\nこの exe: {actual}\n\n\
-                 リリースページを開きますか？",
-                updater::CURRENT
-            ));
-            let answer = unsafe { MessageBoxW(None, &text, &HSTRING::from("GHUB Battery - 起動を中止しました"), MB_YESNO | MB_ICONERROR | MB_SETFOREGROUND) };
+            let t = i18n::t();
+            let text = HSTRING::from(i18n::f(t.mismatch_fmt, &[&updater::CURRENT, &tag, &expected, &actual]));
+            let answer = unsafe { MessageBoxW(None, &text, &HSTRING::from(t.mismatch_title), MB_YESNO | MB_ICONERROR | MB_SETFOREGROUND) };
             if answer == IDYES {
                 updater::open_page(Some(&updater::Release { page_url, ..Default::default() }));
             }
@@ -393,10 +392,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "2.5.0");
+        assert_eq!(crate::updater::CURRENT, "3.0.0");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v2.5.1").is_newer() && r("v2.6.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v2.5.0").is_newer() && !r("v2.5").is_newer() && !r("v2.4.0").is_newer() && !r("nightly").is_newer());
+        assert!(r("v3.0.1").is_newer() && r("v3.1.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v3.0.0").is_newer() && !r("v3.0").is_newer() && !r("v2.5.0").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -592,5 +591,55 @@ SHA256: {}", hash.to_uppercase()),
         assert_eq!(ctx.since_secs, Some(2 * h + 60));
         assert_eq!(ctx.streak_secs, Some(10 * h)); // 記録の 10 時間 > 今の 2 時間
         assert_eq!(ctx.value("now").as_deref(), Some("70"));
+    }
+
+    #[test]
+    fn language_from_windows() {
+        use crate::i18n::{from_langid, Language::*};
+        // 対応言語 (英語は地域で米国式/英国式) と、それ以外は英語 (US)
+        for (id, l) in [(0x0411, Ja), (0x0409, EnUs), (0x0809, EnGb), (0x0C09, EnGb), (0x1009, EnUs), (0x0407, De), (0x0C07, De), (0x040C, Fr), (0x0C0C, Fr), (0x0412, Ko), (0x0804, ZhCn), (0x0404, ZhCn), (0x0410, EnUs), (0x0419, EnUs)] {
+            assert_eq!(from_langid(id), l, "{id:#06x}");
+        }
+    }
+
+    #[test]
+    fn every_language_formats() {
+        use crate::i18n::{f, texts, CHOICES};
+        for l in CHOICES {
+            let t = texts(l);
+            // 置き換え番号が残らない
+            for (fmt, n) in [(t.pending_fmt, 1), (t.empty_in_fmt, 3), (t.mismatch_fmt, 4), (t.month_year_fmt, 2), (t.date_md_fmt, 2), (t.err_size_fmt, 2)] {
+                let args: Vec<String> = (0..n).map(|i| format!("<{i}>")).collect();
+                let refs: Vec<&dyn std::fmt::Display> = args.iter().map(|a| a as &dyn std::fmt::Display).collect();
+                let out = f(fmt, &refs);
+                assert!(!out.contains('{') || fmt.contains("\"title\""), "{l:?}: {out}");
+                for a in &args {
+                    assert!(out.contains(a.as_str()), "{l:?}: {fmt} に {a} がない");
+                }
+            }
+            assert!(t.default_rule_message.contains("{name}") && t.default_rule_message.contains("{battery}"), "{l:?}");
+        }
+    }
+
+    #[test]
+    fn log_ids_are_unique() {
+        // ログの ID (E001 など) は 1 か所でだけ使う
+        let sources = [
+            include_str!("envinfo.rs"), include_str!("ghub.rs"), include_str!("health.rs"), include_str!("hidpp.rs"), include_str!("history.rs"),
+            include_str!("log.rs"), include_str!("main.rs"), include_str!("settings.rs"), include_str!("sources.rs"), include_str!("startup.rs"),
+            include_str!("tray.rs"), include_str!("ui.rs"), include_str!("updater.rs"), include_str!("webhook.rs"),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for src in sources {
+            let code = src.split("#[cfg(test)]").next().unwrap_or_default();
+            for (i, _) in code.match_indices('"') {
+                let id = &code[i + 1..];
+                let ok = id.len() > 5 && matches!(id.as_bytes()[0], b'E' | b'W' | b'I' | b'D') && id.as_bytes()[1..4].iter().all(u8::is_ascii_digit) && id.as_bytes()[4] == b'"';
+                if ok {
+                    assert!(seen.insert(&id[..4]), "ID {} が重複しています", &id[..4]);
+                }
+            }
+        }
+        assert!(seen.len() >= 70, "{}", seen.len());
     }
 }

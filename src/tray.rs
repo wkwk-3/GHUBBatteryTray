@@ -90,7 +90,7 @@ pub fn combine(items: &[Pending]) -> (String, String, i32) {
     }
     // アイコンは一番重いもの (エラー > 警告 > 情報 > なし)
     let kind = items.iter().map(|p| p.kind).max().unwrap_or(0);
-    (format!("保留中の通知 ({} 件)", items.len()), text, kind)
+    (crate::i18n::f(crate::i18n::t().pending_fmt, &[&items.len()]), text, kind)
 }
 
 static mut APP: Option<App> = None;
@@ -132,11 +132,11 @@ pub fn run() {
         apply_menu_theme();
         update_icon();
 
-        log::info(format!("アプリを開始しました (バージョン {})", env!("CARGO_PKG_VERSION")));
+        log::info("I011", format!("アプリを開始しました (バージョン {})", env!("CARGO_PKG_VERSION")));
         crate::envinfo::log_startup(&app().settings);
         updater::cleanup_old();
         if std::env::args().any(|a| a == "--after-update") {
-            notify("GHUB Battery", &format!("v{} に更新しました", updater::CURRENT), 1);
+            notify("GHUB Battery", &crate::i18n::f(crate::i18n::t().updated_fmt, &[&updater::CURRENT]), 1);
         }
 
         let hwnd_raw = hwnd.0 as isize;
@@ -152,7 +152,7 @@ pub fn run() {
         for uid in 1..=app().icons.len() as u32 {
             remove_tray_icon(uid);
         }
-        log::info("アプリを終了しました");
+        log::info("I012", "アプリを終了しました");
     }
 }
 
@@ -161,28 +161,28 @@ fn log_changes(prev: &[Battery], list: &[Battery]) {
     let src = |b: &Battery| b.source.map(|s| s.label()).unwrap_or("-");
     for b in list {
         match prev.iter().find(|p| p.device_name == b.device_name) {
-            None => log::info(format!("デバイスを検出: {} {}% (取得元: {})", b.label(), b.percentage, src(b))),
+            None => log::info("I013", format!("デバイスを検出: {} {}% (取得元: {})", b.label(), b.percentage, src(b))),
             Some(p) => {
                 if p.source != b.source {
-                    log::info(format!("取得元が変わりました: {} {} → {}", b.label(), src(p), src(b)));
+                    log::info("I014", format!("取得元が変わりました: {} {} → {}", b.label(), src(p), src(b)));
                 }
                 if p.charging != b.charging && b.connected {
-                    log::info(format!("{}: {} ({}%)", b.label(), if b.charging { "充電を開始" } else { "充電を終了" }, b.percentage));
+                    log::info("I015", format!("{}: {} ({}%)", b.label(), if b.charging { "充電を開始" } else { "充電を終了" }, b.percentage));
                 }
                 if p.asleep != b.asleep {
-                    log::info(format!("{}: {}", b.label(), if b.asleep { "スリープ中 (前回の値を表示)" } else { "スリープから復帰" }));
+                    log::info("I016", format!("{}: {}", b.label(), if b.asleep { "スリープ中 (前回の値を表示)" } else { "スリープから復帰" }));
                 }
                 if p.connected != b.connected {
-                    log::info(format!("{}: {}", b.label(), if b.connected { "接続" } else { "未接続" }));
+                    log::info("I017", format!("{}: {}", b.label(), if b.connected { "接続" } else { "未接続" }));
                 }
             }
         }
     }
     for p in prev.iter().filter(|p| !list.iter().any(|b| b.device_name == p.device_name)) {
-        log::info(format!("デバイスが切断されました: {}", p.label()));
+        log::info("I018", format!("デバイスが切断されました: {}", p.label()));
     }
     if list.is_empty() && !prev.is_empty() {
-        log::warn("バッテリー情報を取得できませんでした (直接通信・G HUB API・settings.db すべて)");
+        log::warn("W010", "バッテリー情報を取得できませんでした (直接通信・G HUB API・settings.db すべて)");
     }
 }
 
@@ -229,7 +229,7 @@ fn update_checker(hwnd: isize) {
                             }
                         }
                     }
-                    Err(e) => log::warn(format!("更新の確認に失敗しました: {e}")),
+                    Err(e) => log::warn("W011", format!("更新の確認に失敗しました: {e}")),
                 }
             }
         }
@@ -247,7 +247,7 @@ fn worker(hwnd: isize, shared: Arc<Mutex<Shared>>, refresh: Arc<AtomicBool>) {
         let list = sources::collect(&mut reader);
         if log::debug_enabled() {
             let summary: Vec<String> = list.iter().map(|b| format!("{} {}%{}{} [{}]", b.label(), b.percentage, if b.charging { " 充電中" } else { "" }, if b.asleep { " スリープ" } else { "" }, b.source.map(|s| s.label()).unwrap_or("?"))).collect();
-            log::debug(format!("取得結果: {}", if summary.is_empty() { "なし".into() } else { summary.join(", ") }));
+            log::debug("D006", format!("取得結果: {}", if summary.is_empty() { "なし".into() } else { summary.join(", ") }));
         }
         recorder.record(&list);
         log_changes(&prev, &list);
@@ -285,7 +285,7 @@ fn add_tray_icon(uid: u32) {
     copy_wstr(&mut nid.szTip, "GHUB Battery");
     unsafe {
         if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
-            log::error(format!("トレイアイコンを登録できませんでした (番号 {uid}): {}", windows::core::Error::from_thread()));
+            log::error("E007", format!("トレイアイコンを登録できませんでした (番号 {uid}): {}", windows::core::Error::from_thread()));
         }
     }
 }
@@ -328,7 +328,7 @@ fn reload_settings_if_changed() {
     if time != app().settings_time {
         app().settings = Settings::load();
         app().settings_time = time;
-        log::info("設定を読み込み直しました");
+        log::info("I019", "設定を読み込み直しました");
     }
 }
 
@@ -349,12 +349,13 @@ fn update_icon() {
 
     for (i, tray) in slots.iter().enumerate() {
         let battery = list.iter().find(|b| !tray.is_empty() && b.device_name.eq_ignore_ascii_case(tray));
+        let t = crate::i18n::t();
         let tip = match battery {
             Some(b) => format!("{}\n{}", b.label(), b.status()),
-            None if !loaded() => "GHUB Battery\n取得中...".into(),
-            None if tray.is_empty() && list.is_empty() => "GHUB Battery\nバッテリー情報を取得できません".into(),
-            None if tray.is_empty() => "GHUB Battery\n右クリックで表示するデバイスを選択".into(),
-            None => format!("{tray}\nデバイスが見つかりません"),
+            None if !loaded() => format!("GHUB Battery\n{}", t.loading),
+            None if tray.is_empty() && list.is_empty() => format!("GHUB Battery\n{}", t.tip_no_info),
+            None if tray.is_empty() => format!("GHUB Battery\n{}", t.tip_pick),
+            None => format!("{tray}\n{}", t.no_devices),
         };
 
         let new_icon = icon::create(battery, icon_size(), &a.settings.level_colors);
@@ -377,7 +378,7 @@ fn notify(title: &str, text: &str, kind: i32) {
 fn notify_ex(title: &str, text: &str, kind: i32, is_update: bool) {
     let a = app();
     if a.settings.defer_in_fullscreen && crate::fullscreen::active() {
-        log::info(format!("フルスクリーン中のため通知を保留: {title} / {}", text.replace("\r\n", " ")));
+        log::info("I020", format!("フルスクリーン中のため通知を保留: {title} / {}", text.replace("\r\n", " ")));
         a.pending.push(Pending { title: title.into(), text: text.into(), kind, is_update });
         unsafe {
             SetTimer(Some(a.hwnd), TIMER_FULLSCREEN, FULLSCREEN_POLL_MS, None);
@@ -405,13 +406,13 @@ fn flush_pending() {
     }
     let items = std::mem::take(&mut a.pending);
     let (title, text, kind) = combine(&items);
-    log::info(format!("フルスクリーン終了。保留中の通知を表示 ({} 件)", items.len()));
+    log::info("I021", format!("フルスクリーン終了。保留中の通知を表示 ({} 件)", items.len()));
     show_balloon(&title, &text, kind);
     app().update_balloon = items.iter().any(|p| p.is_update);
 }
 
 fn show_balloon(title: &str, text: &str, kind: i32) {
-    log::info(format!("通知: {title} / {}", text.replace("\r\n", " ").replace('\n', " ")));
+    log::info("I022", format!("通知: {title} / {}", text.replace("\r\n", " ").replace('\n', " ")));
     let mut nid = tray_data(1);
     nid.uFlags = NIF_INFO;
     copy_wstr(&mut nid.szInfoTitle, title);
@@ -444,15 +445,16 @@ fn check_notifications() {
         // 満充電通知
         if b.charging && (b.fully_charged || b.percentage >= 100) {
             if a.settings.notify_full_charge && a.full_notified.insert(b.device_name.clone()) {
-                notify(b.label(), "充電が完了しました", 1);
-                webhook::send_if_enabled(&a.settings, webhook::Message { title: b.label().into(), text: "充電が完了しました".into(), device: b.device_name.clone(), battery: b.percentage, event: "full_charge" });
+                let done = crate::i18n::t().full_charge_done;
+                notify(b.label(), done, 1);
+                webhook::send_if_enabled(&a.settings, webhook::Message { title: b.label().into(), text: done.into(), device: b.device_name.clone(), battery: b.percentage, event: "full_charge" });
             }
         } else if !b.charging {
             a.full_notified.remove(&b.device_name);
         }
 
         let Some(rules) = a.settings.rules(&b.device_name) else {
-            log::debug(format!("通知ルールなし: {} ({})", b.label(), b.device_name));
+            log::debug("D007", format!("通知ルールなし: {} ({})", b.label(), b.device_name));
             continue;
         };
         let mut rules = rules.clone();
@@ -463,7 +465,7 @@ fn check_notifications() {
             // 充電中は残量低下を通知しない
             if !b.charging && b.percentage <= rule.battery {
                 if !a.notified.insert(key) {
-                    log::debug(format!("通知済みのため送りません: {} {}% (しきい値 {}%)", b.label(), b.percentage, rule.battery));
+                    log::debug("D008", format!("通知済みのため送りません: {} {}% (しきい値 {}%)", b.label(), b.percentage, rule.battery));
                 } else {
                     let text = crate::placeholders::expand(&rule.message, &placeholder_context(b, rule.battery));
                     notify(b.label(), &text, rule.balloon_tip_icon);
@@ -503,37 +505,38 @@ fn show_menu() {
             let _ = AppendMenuW(menu, flags, id as usize, &w);
         };
 
-        add(MF_STRING | MF_DISABLED | MF_GRAYED, 0, "トレイに表示するデバイス (複数選択可)");
+        let t = crate::i18n::t();
+        add(MF_STRING | MF_DISABLED | MF_GRAYED, 0, t.menu_devices);
         for (i, b) in list.iter().enumerate() {
             let checked = if app().settings.is_tray(&b.device_name) { MF_CHECKED } else { MF_UNCHECKED };
             let src = b.source.map(|s| format!("  [{}]", s.label())).unwrap_or_default();
             add(MF_STRING | checked, ID_DEVICE + i as u32, &format!("{}\t{}{}", b.label(), b.status(), src));
         }
         if list.is_empty() {
-            add(MF_STRING | MF_DISABLED | MF_GRAYED, 0, "    デバイスが見つかりません");
+            add(MF_STRING | MF_DISABLED | MF_GRAYED, 0, &format!("    {}", t.no_devices));
         }
-        add(MF_STRING | if app().settings.tray_display_devices.is_empty() { MF_CHECKED } else { MF_UNCHECKED }, ID_NONE, "表示しない");
+        add(MF_STRING | if app().settings.tray_display_devices.is_empty() { MF_CHECKED } else { MF_UNCHECKED }, ID_NONE, t.menu_hide);
         add(MF_SEPARATOR, 0, "");
-        add(MF_STRING | MF_DEFAULT, ID_SETTINGS, "設定を開く...");
+        add(MF_STRING | MF_DEFAULT, ID_SETTINGS, t.menu_settings);
         if let Some(r) = updater::State::load().available() {
-            add(MF_STRING, ID_UPDATE, &format!("更新があります ({})...", r.tag));
+            add(MF_STRING, ID_UPDATE, &crate::i18n::f(t.menu_update_fmt, &[&r.tag]));
         }
-        add(MF_STRING, ID_REFRESH, "残量を今すぐ再取得");
-        add(MF_STRING | if startup::enabled() { MF_CHECKED } else { MF_UNCHECKED }, ID_STARTUP, "Windows 起動時に開始");
+        add(MF_STRING, ID_REFRESH, t.menu_refresh);
+        add(MF_STRING | if startup::enabled() { MF_CHECKED } else { MF_UNCHECKED }, ID_STARTUP, t.start_with_windows);
         let no_url = app().settings.webhook_url.trim().is_empty();
         let webhook_flags = if no_url { MF_DISABLED | MF_GRAYED } else { MENU_ITEM_FLAGS(0) };
         let webhook_check = if app().settings.webhook_enabled { MF_CHECKED } else { MF_UNCHECKED };
-        add(MF_STRING | webhook_flags | webhook_check, ID_WEBHOOK, if no_url { "Webhook 通知 (設定画面で URL を入力)" } else { "Webhook 通知" });
+        add(MF_STRING | webhook_flags | webhook_check, ID_WEBHOOK, if no_url { t.menu_webhook_no_url } else { t.menu_webhook });
 
         let theme_menu = CreatePopupMenu().unwrap_or_default();
         for (i, t) in [Theme::System, Theme::Light, Theme::Dark].iter().enumerate() {
             let flags = if *t == app().settings.theme { MF_CHECKED } else { MF_UNCHECKED };
             let _ = AppendMenuW(theme_menu, MF_STRING | flags, (ID_THEME + i as u32) as usize, &HSTRING::from(t.label()));
         }
-        let _ = AppendMenuW(menu, MF_POPUP, theme_menu.0 as usize, &HSTRING::from(format!("テーマ: {}", app().settings.theme.label())));
+        let _ = AppendMenuW(menu, MF_POPUP, theme_menu.0 as usize, &HSTRING::from(crate::i18n::f(t.theme_fmt, &[&app().settings.theme.label()])));
 
         add(MF_SEPARATOR, 0, "");
-        add(MF_STRING, ID_EXIT, "終了");
+        add(MF_STRING, ID_EXIT, t.menu_exit);
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -548,16 +551,16 @@ fn show_menu() {
             ID_REFRESH => app().refresh.store(true, Ordering::Relaxed),
             ID_STARTUP => startup::set(!startup::enabled()),
             ID_EXIT => {
-                log::info("メニューから終了が選ばれました");
+                log::info("I023", "メニューから終了が選ばれました");
                 PostQuitMessage(0)
             }
             ID_WEBHOOK => {
                 update_settings(|s| s.webhook_enabled = !s.webhook_enabled);
-                log::info(format!("Webhook 通知: {}", if app().settings.webhook_enabled { "オン" } else { "オフ" }));
+                log::info("I024", format!("Webhook 通知: {}", if app().settings.webhook_enabled { "オン" } else { "オフ" }));
             }
             id if (ID_THEME..ID_THEME + 3).contains(&id) => {
                 update_settings(|s| s.theme = [Theme::System, Theme::Light, Theme::Dark][(id - ID_THEME) as usize]);
-                log::info(format!("テーマ: {}", app().settings.theme.label()));
+                log::info("I025", format!("テーマ: {}", app().settings.theme.label()));
                 apply_menu_theme();
             }
             ID_NONE => {
@@ -580,7 +583,7 @@ fn toggle_tray_device(name: &str) {
         let show = !s.is_tray(name);
         s.set_tray(name, show);
     });
-    log::info(format!("アイコン表示: {name} を{}", if app().settings.is_tray(name) { "表示" } else { "非表示" }));
+    log::info("I026", format!("アイコン表示: {name} を{}", if app().settings.is_tray(name) { "表示" } else { "非表示" }));
     update_icon();
 }
 
@@ -590,7 +593,7 @@ fn update_settings(change: impl FnOnce(&mut Settings)) {
     a.settings = Settings::load();
     change(&mut a.settings);
     if let Err(e) = a.settings.save() {
-        log::error(format!("設定の保存に失敗しました: {e}"));
+        log::error("E008", format!("設定の保存に失敗しました: {e}"));
     }
     a.settings_time = settings::modified();
 }
@@ -649,13 +652,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 LRESULT(0)
             }
             WM_APP_QUIT => {
-                log::info("更新のため終了します");
+                log::info("I027", "更新のため終了します");
                 PostQuitMessage(0);
                 LRESULT(0)
             }
             WM_APP_UPDATE_FOUND => {
                 if let Some(r) = updater::State::load().available() {
-                    notify_ex("GHUB Battery の更新があります", &format!("{} を公開しました。クリックして更新できます", r.tag), 1, true);
+                    let t = crate::i18n::t();
+                    notify_ex(t.update_balloon_title, &crate::i18n::f(t.update_balloon_fmt, &[&r.tag]), 1, true);
                 }
                 LRESULT(0)
             }
