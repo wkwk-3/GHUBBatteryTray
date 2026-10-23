@@ -261,14 +261,69 @@ fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
     }
 }
 
+/// 充電中の残量の上がり方から、電池に入る電力と満充電までの時間を求める
+#[derive(Default)]
+struct ChargeTracker {
+    /// デバイスごとの、充電中に残量が変わった時刻 (unix 秒) と残量
+    ticks: std::collections::HashMap<String, Vec<(f64, i32)>>,
+    /// デバイスごとの推定容量 (mWh) と、求めた時刻。統計から求めるので 1 時間は使い回す
+    capacity: std::collections::HashMap<String, (std::time::Instant, Option<f64>)>,
+}
+
+impl ChargeTracker {
+    fn apply(&mut self, list: &mut [Battery]) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        for b in list.iter_mut() {
+            let key = b.device_name.to_ascii_lowercase();
+            if !(b.connected && b.charging && !b.asleep && !b.fully_charged) {
+                self.ticks.remove(&key);
+                continue;
+            }
+            let ticks = self.ticks.entry(key.clone()).or_default();
+            if ticks.last().map(|x| x.1) != Some(b.percentage) {
+                ticks.push((now, b.percentage));
+                // 直近の 10 段で測る (満充電に近づくと遅くなるため)
+                if ticks.len() > 11 {
+                    ticks.remove(0);
+                }
+            }
+            // 最初の点は充電を見つけた時点 (1% の途中) なので、2 回目以降の変化の間で測る
+            if ticks.len() < 3 {
+                continue;
+            }
+            let ((t0, p0), (t1, p1)) = (ticks[1], ticks[ticks.len() - 1]);
+            if p1 <= p0 || t1 <= t0 {
+                continue;
+            }
+            let rate = (p1 - p0) as f64 / (t1 - t0) * 3600.0;
+            b.charge_rate = Some(rate);
+            b.charge_power_mw = self.capacity_mwh(&key, b).map(|c| c * rate / 100.0);
+        }
+    }
+
+    /// 推定容量: 長期の統計 (放電量と減った残量から) があればそれ、なければ G HUB の放電量 × 満充電での持ち時間
+    fn capacity_mwh(&mut self, key: &str, b: &Battery) -> Option<f64> {
+        let fresh = self.capacity.get(key).filter(|(at, _)| at.elapsed() < Duration::from_secs(3600)).map(|(_, c)| *c);
+        let from_stats = fresh.unwrap_or_else(|| {
+            let hours = crate::stats::load(&crate::stats::path_for(key));
+            let c = crate::stats::analyze(&hours, &[], crate::history::now(), log::utc_offset_secs()).capacity_mwh;
+            self.capacity.insert(key.to_string(), (std::time::Instant::now(), c));
+            c
+        });
+        from_stats.or_else(|| Some(b.power_mw? * b.max_life_hours?))
+    }
+}
+
 /// 取得スレッド
 fn worker(hwnd: isize, shared: Arc<Mutex<Shared>>, refresh: Arc<AtomicBool>) {
     let mut reader = hidpp::Reader::new();
+    let mut charge = ChargeTracker::default();
     let mut recorder = crate::history::Recorder::default();
     let mut prev: Vec<Battery> = Vec::new();
     loop {
         let started = std::time::Instant::now();
-        let list = sources::collect(&mut reader);
+        let mut list = sources::collect(&mut reader);
+        charge.apply(&mut list);
         if log::debug_enabled() {
             let summary: Vec<String> = list.iter().map(|b| format!("{} {}%{}{} [{}]", b.label(), b.percentage, if b.charging { " 充電中" } else { "" }, if b.asleep { " スリープ" } else { "" }, b.source.map(|s| s.label()).unwrap_or("?"))).collect();
             log::debug("D006", format!("取得結果: {} ({} ms)", if summary.is_empty() { "なし".into() } else { summary.join(", ") }, started.elapsed().as_millis()));

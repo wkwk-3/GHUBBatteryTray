@@ -12,6 +12,7 @@ use tungstenite::{Message, WebSocket};
 
 /// 常駐から設定画面へ送るため serde で書き出せる
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Battery {
     /// 設定のキー (settings.db の battery/{name}/percentage と同じ名前)
     pub device_name: String,
@@ -30,6 +31,10 @@ pub struct Battery {
     pub power_mw: Option<f64>,
     /// G HUB が推定した満充電での持ち時間 (時間)
     pub max_life_hours: Option<f64>,
+    /// 充電中の残量の上がり方 (%/時)。常駐が充電中の残量の変化から求める
+    pub charge_rate: Option<f64>,
+    /// 電池に入っている電力 (mW、推定) = 推定容量 × 上がり方
+    pub charge_power_mw: Option<f64>,
 }
 
 impl Battery {
@@ -49,6 +54,16 @@ impl Battery {
             s += &format!(" / {}", t.asleep);
         } else if self.charging {
             s += &format!(" / {}", if self.fully_charged { t.fully_charged } else { t.charging });
+            if !self.fully_charged {
+                if let Some(mw) = self.charge_power_mw {
+                    s += &format!(" / {}", f(t.charge_power_fmt, &[&crate::i18n::dec(mw, 0)]));
+                }
+                if let Some(rate) = self.charge_rate.filter(|r| *r > 0.0) {
+                    let left = (100 - self.percentage).max(0) as f64 / rate;
+                    let about = f(t.about_fmt, &[&crate::placeholders::duration_text((left * 3600.0) as u64)]);
+                    s += &format!(" / {}", f(t.full_in_fmt, &[&about]));
+                }
+            }
         } else if let Some(h) = self.remaining_hours {
             let about = f(t.about_fmt, &[&crate::placeholders::duration_text((h * 3600.0) as u64)]);
             s += &format!(" / {}", f(t.remaining_fmt, &[&about]));
@@ -218,4 +233,5 @@ pub fn fetch_agent() -> Option<Vec<Battery>> {
         }
     }
 }
+
 

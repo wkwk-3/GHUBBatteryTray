@@ -204,6 +204,10 @@ pub struct Texts {
     pub fully_charged: &'static str,
     pub remaining_fmt: &'static str,
     pub power_fmt: &'static str,
+    /// 充電中に電池に入っている電力 (推定)
+    pub charge_power_fmt: &'static str,
+    /// 満充電までの時間
+    pub full_in_fmt: &'static str,
     pub no_devices: &'static str,
     pub loading: &'static str,
     pub full_charge_done: &'static str,
@@ -272,9 +276,11 @@ pub struct Texts {
     // 設定画面: デバイス
     pub no_devices_long: &'static str,
     pub rules_title_fmt: &'static str,
-    pub notify_full_charge: &'static str,
     pub show_icon: &'static str,
-    pub show_icon_hover: &'static str,
+    pub tray_icon_on_hover: &'static str,
+    pub tray_icon_off_hover: &'static str,
+    pub full_charge_on_hover: &'static str,
+    pub full_charge_off_hover: &'static str,
     pub col_enabled: &'static str,
     pub col_threshold: &'static str,
     pub col_icon: &'static str,
@@ -283,7 +289,6 @@ pub struct Texts {
     pub delete: &'static str,
     pub preview_fmt: &'static str,
     pub completion_help: &'static str,
-    pub icon_shown: &'static str,
     pub collapse: &'static str,
     pub expand: &'static str,
 

@@ -498,7 +498,12 @@ impl SettingsApp {
             for (name, battery) in &names {
                 let is_tray = self.settings.is_tray(name);
                 let selected = name.eq_ignore_ascii_case(&self.selected);
-                if device_card(ui, p, &self.settings.level_colors, name, battery.as_ref(), selected, selected && self.expanded, is_tray).clicked() {
+                let (card, icon_clicked) = device_card(ui, p, &self.settings.level_colors, name, battery.as_ref(), selected, selected && self.expanded, is_tray);
+                if icon_clicked {
+                    // カード右上のアイコン: タスクトレイへの表示を切り替える
+                    self.settings.set_tray(name, !is_tray);
+                    self.dirty = true;
+                } else if card.clicked() {
                     // 同じカードなら開閉、別のカードなら選んで開く
                     self.expanded = !(selected && self.expanded);
                     self.selected = name.clone();
@@ -517,7 +522,9 @@ impl SettingsApp {
         state.show_body_unindented(ui, |ui| {
             ui.add_space(12.0);
             let samples = self.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            detail_panel(ui, p, battery.as_ref(), samples, &selected_health);
+            if detail_panel(ui, p, battery.as_ref(), samples, &selected_health, &mut self.settings.notify_full_charge) {
+                self.dirty = true;
+            }
         });
         state.store(ui.ctx());
 
@@ -529,17 +536,6 @@ impl SettingsApp {
         let selected_label = names.iter().find(|(n, _)| n == &self.selected).map(label).unwrap_or(&self.selected).to_string();
         ui.horizontal(|ui| {
             ui.label(RichText::new(f(t().rules_title_fmt, &[&selected_label])).size(18.0).strong().color(p.text));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.checkbox(&mut self.settings.notify_full_charge, t().notify_full_charge).changed() {
-                    self.dirty = true;
-                }
-                let mut tray = self.settings.is_tray(&self.selected);
-                if ui.checkbox(&mut tray, t().show_icon).on_hover_text(t().show_icon_hover).changed() {
-                    let selected = self.selected.clone();
-                    self.settings.set_tray(&selected, tray);
-                    self.dirty = true;
-                }
-            });
         });
         ui.add_space(6.0);
 
@@ -988,6 +984,35 @@ fn folder_button(ui: &mut egui::Ui, p: Palette) -> egui::Response {
     response
 }
 
+/// 充電完了通知の切り替え (ベル。オンは青、オフはグレーに斜線)
+fn bell_button(ui: &mut egui::Ui, p: Palette, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    if response.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(5), visuals.bg_fill);
+    }
+    let color = if on { ACCENT } else { p.sub.gamma_multiply(0.7) };
+    let c = rect.center();
+    let painter = ui.painter();
+    // ベル: 本体 (上が丸い台形) + 縁 + 下の玉
+    let body = vec![
+        c + Vec2::new(-5.0, 4.0),
+        c + Vec2::new(-4.5, -2.0),
+        c + Vec2::new(-2.5, -5.5),
+        c + Vec2::new(2.5, -5.5),
+        c + Vec2::new(4.5, -2.0),
+        c + Vec2::new(5.0, 4.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(body, color, Stroke::NONE));
+    painter.circle_filled(c + Vec2::new(0.0, -5.8), 1.4, color);
+    painter.line_segment([c + Vec2::new(-7.0, 4.0), c + Vec2::new(7.0, 4.0)], Stroke::new(1.6, color));
+    painter.circle_filled(c + Vec2::new(0.0, 6.6), 1.6, color);
+    if !on {
+        painter.line_segment([c + Vec2::new(-7.0, -7.0), c + Vec2::new(7.0, 7.0)], Stroke::new(1.6, p.danger.gamma_multiply(0.8)));
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Discord のロゴ (assets/discord.svg を 64x64 のアルファ値にしたもの。作り直しは assets/svg_mask.ps1)
 const DISCORD_MASK: &[u8; 64 * 64] = include_bytes!("../assets/discord_mask.bin");
 
@@ -1205,7 +1230,8 @@ fn message_field(ui: &mut egui::Ui, p: Palette, row: usize, rule: &mut Rule, wid
 }
 
 #[allow(clippy::too_many_arguments)]
-fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, battery: Option<&Battery>, selected: bool, expanded: bool, is_tray: bool) -> egui::Response {
+/// デバイスのカード。(カードの応答, 右上のアイコンが押されたか)
+fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, battery: Option<&Battery>, selected: bool, expanded: bool, is_tray: bool) -> (egui::Response, bool) {
     let (r, g, b) = level_color(battery, colors);
     let accent = Color32::from_rgb(r, g, b);
     let size = Vec2::new(390.0, 104.0);
@@ -1220,10 +1246,27 @@ fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, 
     let title = battery.map(|b| b.label()).unwrap_or(name);
     painter.text(rect.min + Vec2::new(pad, pad - 2.0), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(14.0), p.text);
 
-    // 取得元のタグ (右上)
+    // 右上: 取得元のタグと、その右にトレイアイコンの見本 (今の残量と色。表示中は残量の色、表示していなければグレー)。
+    // アイコンはタグと同じ高さにそろえ、押すとタスクトレイへの表示を切り替える
+    let tag_font = egui::FontId::proportional(11.0);
+    let tag_h = painter.layout_no_wrap("0".into(), tag_font.clone(), p.sub).size().y + 4.0;
+    let icon = egui::Rect::from_min_size(egui::pos2(rect.max.x - pad - tag_h * 1.3, rect.min.y + pad - 3.0), Vec2::new(tag_h * 1.3, tag_h));
+    let icon_resp = ui.interact(icon, ui.make_persistent_id(("tray_icon", name)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let icon_text = match battery {
+        Some(b) if b.connected => b.percentage.clamp(0, 100).to_string(),
+        _ => "--".into(),
+    };
+    let (icon_fill, icon_ink) = if is_tray { (accent, Color32::WHITE) } else { (p.track, p.sub) };
+    painter.rect_filled(icon, CornerRadius::same(4), icon_fill);
+    if icon_resp.hovered() {
+        painter.rect_stroke(icon, CornerRadius::same(4), Stroke::new(1.0, ACCENT), egui::StrokeKind::Outside);
+    }
+    let icon_font = egui::FontId::proportional(if icon_text.len() >= 3 { 10.0 } else { 11.5 });
+    painter.text(icon.center(), egui::Align2::CENTER_CENTER, icon_text, icon_font, icon_ink);
+    let icon_clicked = icon_resp.on_hover_text(if is_tray { t().tray_icon_on_hover } else { t().tray_icon_off_hover }).clicked();
     if let Some(src) = battery.and_then(|b| b.source) {
-        let galley = painter.layout_no_wrap(src.label().into(), egui::FontId::proportional(11.0), p.sub);
-        let tag = egui::Rect::from_min_size(egui::pos2(rect.max.x - pad - galley.size().x - 12.0, rect.min.y + pad - 3.0), galley.size() + Vec2::new(12.0, 4.0));
+        let galley = painter.layout_no_wrap(src.label().into(), tag_font, p.sub);
+        let tag = egui::Rect::from_min_size(egui::pos2(icon.min.x - 6.0 - galley.size().x - 12.0, icon.min.y), Vec2::new(galley.size().x + 12.0, tag_h));
         painter.rect(tag, CornerRadius::same(4), p.bg, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
         painter.galley(tag.min + Vec2::new(6.0, 2.0), galley, p.sub);
     }
@@ -1235,19 +1278,37 @@ fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, 
     let big = painter.text(rect.min + Vec2::new(pad, 34.0), egui::Align2::LEFT_TOP, percent, egui::FontId::proportional(28.0), accent);
 
     let mut notes = Vec::new();
-    if is_tray {
-        notes.push(t().icon_shown.to_string());
-    }
     match battery {
         Some(b) if b.connected => {
             let status = b.status();
             if let Some(rest) = status.split_once(" / ") {
-                notes.push(rest.1.to_string());
+                notes.extend(rest.1.split(" / ").map(str::to_string));
             }
         }
         _ => notes.push(t().disconnected.into()),
     }
-    painter.text(egui::pos2(big.max.x + 10.0, big.center().y), egui::Align2::LEFT_CENTER, notes.join(" / "), egui::FontId::proportional(12.5), p.sub);
+    // 1 行で収める。長いとき (充電中の電力・時間など) は文字を少し小さくし、それでも入らなければ区切り (" / ") で改行する
+    let left = big.max.x + 10.0;
+    let width = rect.max.x - pad - left;
+    let text = notes.join(" / ");
+    let fits = |size: f32| painter.layout_no_wrap(text.clone(), egui::FontId::proportional(size), p.sub).size().x <= width;
+    let size = [12.5, 12.0, 11.5, 11.0].into_iter().find(|s| fits(*s));
+    let galley = match size {
+        Some(size) => painter.layout_no_wrap(text.clone(), egui::FontId::proportional(size), p.sub),
+        None => {
+            let font = egui::FontId::proportional(11.5);
+            let mut lines: Vec<String> = Vec::new();
+            for note in &notes {
+                match lines.last_mut() {
+                    Some(line) if painter.layout_no_wrap(format!("{line} / {note}"), font.clone(), p.sub).size().x <= width => *line = format!("{line} / {note}"),
+                    _ => lines.push(note.clone()),
+                }
+            }
+            painter.layout_no_wrap(lines.join("
+"), font, p.sub)
+        }
+    };
+    painter.galley(egui::pos2(left, big.center().y - galley.size().y / 2.0), galley, p.sub);
 
     // 残量バー
     let bar = egui::Rect::from_min_size(egui::pos2(rect.min.x + pad, rect.max.y - pad - 6.0), Vec2::new(rect.width() - pad * 2.0 - 70.0, 6.0));
@@ -1262,7 +1323,7 @@ fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, 
     let hint_color = if selected || response.hovered() { ACCENT } else { p.sub };
     painter.text(egui::pos2(rect.max.x - pad, bar.center().y), egui::Align2::RIGHT_CENTER, hint, egui::FontId::proportional(12.0), hint_color);
 
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    (response.on_hover_cursor(egui::CursorIcon::PointingHand), icon_clicked)
 }
 
 /// 小さな「i」アイコン。ホバーで説明を出す
@@ -1288,7 +1349,9 @@ fn heading_with_info(ui: &mut egui::Ui, p: Palette, title: &str, info: &str) {
 }
 
 /// カードの下に開く詳細: 減り具合のグラフと電池の健康状態
-fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, samples: &[Sample], h: &health::Health) {
+/// 詳細。充電完了通知の切り替えを押したら true
+fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, samples: &[Sample], h: &health::Health, notify_full: &mut bool) -> bool {
+    let mut changed = false;
     let now = history::now();
     let offset = log::utc_offset_secs();
     let pending = h.need_days.map(|d| d as usize).unwrap_or_else(|| health::MIN_RUNS - h.runs.min(health::MIN_RUNS));
@@ -1306,12 +1369,17 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
 
             // 右: 健康状態
             let ui = &mut cols[1];
-            heading_with_info(
-                ui,
-                p,
-                t().health_title,
-                t().health_info,
-            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t().health_title).size(15.0).strong().color(p.text));
+                info_icon(ui, p, t().health_info);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let hover = if *notify_full { t().full_charge_on_hover } else { t().full_charge_off_hover };
+                    if bell_button(ui, p, *notify_full).on_hover_text(hover).clicked() {
+                        *notify_full = !*notify_full;
+                        changed = true;
+                    }
+                });
+            });
             ui.add_space(6.0);
 
             // (項目, 値, 値が出ているか, 説明)
@@ -1394,6 +1462,7 @@ fn detail_panel(ui: &mut egui::Ui, p: Palette, battery: Option<&Battery>, sample
             draw_daily(ui.painter(), rect, p, &h.daily, offset);
         });
     });
+    changed
 }
 
 fn hours_text(h: f64) -> String {

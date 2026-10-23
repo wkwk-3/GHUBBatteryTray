@@ -394,10 +394,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "3.2.0");
+        assert_eq!(crate::updater::CURRENT, "3.2.1");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v3.2.1").is_newer() && r("v3.3.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v3.2.0").is_newer() && !r("v3.2").is_newer() && !r("v3.1.1").is_newer() && !r("nightly").is_newer());
+        assert!(r("v3.2.2").is_newer() && r("v3.3.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v3.2.1").is_newer() && !r("v3.2.0").is_newer() && !r("v3.1.1").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -800,5 +800,14 @@ SHA256: {}", hash.to_uppercase()),
         // 受信機の接続通知 (短い報告): bit6 が立っていれば切断
         assert_eq!(parse_notice(&[0x10, 0x01, 0x41, 0x04, 0x01, 0x8A, 0x40], &battery), Some(Notice::Link(1, true)));
         assert_eq!(parse_notice(&[0x10, 0x01, 0x41, 0x04, 0x41, 0x8A, 0x40], &battery), Some(Notice::Link(1, false)));
+    }
+
+    #[test]
+    fn status_shows_charge_power_and_time_to_full() {
+        let b = crate::ghub::Battery { connected: true, charging: true, percentage: 75, charge_rate: Some(97.0), charge_power_mw: Some(271.0), ..Default::default() };
+        assert_eq!(b.status(), "75% / 充電中 / 充電電力 約271 mW / 満充電まで約15分");
+        // 上がり方がまだ分からないうちは「充電中」だけ
+        let early = crate::ghub::Battery { connected: true, charging: true, percentage: 75, ..Default::default() };
+        assert_eq!(early.status(), "75% / 充電中");
     }
 }

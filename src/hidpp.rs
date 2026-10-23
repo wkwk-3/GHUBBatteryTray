@@ -199,8 +199,7 @@ impl Reader {
                         remaining_hours: None,
                         source: Some(Source::Hid),
                         asleep: false,
-                        power_mw: None,
-                        max_life_hours: None,
+                        ..Default::default()
                     };
                     k.last = Some((b.clone(), Instant::now()));
                     list.push(b);
