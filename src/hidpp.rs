@@ -16,6 +16,7 @@ const PING_TIMEOUT: Duration = Duration::from_millis(120);
 /// 見つけたデバイスだけを読む期間。過ぎたら全スロットを探し直す
 const RESCAN_INTERVAL: Duration = Duration::from_secs(600);
 
+const FEATURE_DEVICE_INFO: u16 = 0x0003;
 const FEATURE_DEVICE_NAME: u16 = 0x0005;
 const FEATURE_BATTERY_STATUS: u16 = 0x1000;
 const FEATURE_BATTERY_VOLTAGE: u16 = 0x1001;
@@ -83,6 +84,16 @@ impl Channel<'_> {
         Some(String::from_utf8_lossy(&bytes).trim_end_matches('\0').trim().to_string())
     }
 
+    /// デバイス情報 (0x0003): (unitId を 10 進数にしたもの, 製品 ID の一覧)
+    /// 応答 = [機能の数, unitId (4 バイト), 接続の種類 (2 バイト), 製品 ID (2 バイト × 3), …]
+    fn device_info(&self) -> Option<(String, Vec<u16>)> {
+        let f = self.feature(FEATURE_DEVICE_INFO)?;
+        let r = self.call(f, 0, &[])?;
+        let unit = u32::from_be_bytes([r[1], r[2], r[3], r[4]]);
+        let pids = (0..3).map(|i| u16::from_be_bytes([r[7 + i * 2], r[8 + i * 2]])).filter(|p| *p != 0).collect();
+        (unit != 0).then(|| (unit.to_string(), pids))
+    }
+
     /// 対応しているバッテリー機能を探す
     fn battery_feature(&self) -> Option<(u16, u8)> {
         [FEATURE_UNIFIED_BATTERY, FEATURE_BATTERY_STATUS, FEATURE_BATTERY_VOLTAGE].into_iter().find_map(|id| self.feature(id).map(|f| (id, f)))
@@ -140,6 +151,8 @@ struct Known {
     index: u8,
     name: String,
     feature: (u16, u8),
+    /// デバイス情報 (unitId, 製品 ID)。G HUB との突き合わせ用
+    info: Option<(String, Vec<u16>)>,
     /// 最後に読めた値と時刻 (スリープ中はこれを表示する)
     last: Option<(Battery, Instant)>,
 }
@@ -199,6 +212,9 @@ impl Reader {
                         remaining_hours: None,
                         source: Some(Source::Hid),
                         asleep: false,
+                        unit_id: k.info.as_ref().map(|i| i.0.clone()),
+                        pids: k.info.as_ref().map(|i| i.1.clone()).unwrap_or_default(),
+                        voltage_estimate: k.feature.0 == FEATURE_BATTERY_VOLTAGE,
                         ..Default::default()
                     };
                     k.last = Some((b.clone(), Instant::now()));
@@ -266,7 +282,8 @@ impl Reader {
                     continue;
                 }
                 let last = previous.iter().find(|k| k.name == name).and_then(|k| k.last.clone());
-                self.known.push(Known { path: path.clone(), index, name, feature, last });
+                let info = ch.device_info();
+                self.known.push(Known { path: path.clone(), index, name, feature, info, last });
             }
         }
 

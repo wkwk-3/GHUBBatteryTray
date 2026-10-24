@@ -35,6 +35,12 @@ pub struct Battery {
     pub charge_rate: Option<f64>,
     /// 電池に入っている電力 (mW、推定) = 推定容量 × 上がり方
     pub charge_power_mw: Option<f64>,
+    /// デバイス固有の番号 (HID++ のデバイス情報の unitId を 10 進数にしたもの。G HUB の unitId と同じ)
+    pub unit_id: Option<String>,
+    /// 製品 ID (無線・USB などの接続ごとの PID)。直接通信と G HUB の突き合わせに使う
+    pub pids: Vec<u16>,
+    /// 残量を電圧から推定している (充電中は電圧が高く出るので当てにならない)
+    pub voltage_estimate: bool,
 }
 
 impl Battery {
@@ -161,11 +167,17 @@ impl Agent {
             let Some(id) = d["id"].as_str() else { continue };
             let pick = |keys: &[&str]| keys.iter().filter_map(|k| d[*k].as_str()).find(|s| !s.is_empty()).unwrap_or(id).to_string();
 
+            // 直接通信と突き合わせるための unitId と PID (接続ごと)
+            let interfaces = d["activeInterfaces"].as_array().cloned().unwrap_or_default();
+            let unit_id = interfaces.iter().filter_map(|i| i["unitId"].as_str()).find(|u| !u.is_empty()).map(str::to_string);
+            let pids = interfaces.iter().filter_map(|i| i["pid"].as_u64()).filter(|p| *p > 0).map(|p| p as u16).collect();
             let mut b = Battery {
                 device_name: pick(&["slotPrefix", "deviceModel"]),
                 display_name: pick(&["givenName", "displayName"]),
                 connected: d["state"] == "ACTIVE",
                 source: Some(Source::Agent),
+                unit_id,
+                pids,
                 ..Default::default()
             };
 
@@ -233,5 +245,3 @@ pub fn fetch_agent() -> Option<Vec<Battery>> {
         }
     }
 }
-
-

@@ -324,6 +324,23 @@ fn worker(hwnd: isize, shared: Arc<Mutex<Shared>>, refresh: Arc<AtomicBool>) {
         let started = std::time::Instant::now();
         let mut list = sources::collect(&mut reader);
         charge.apply(&mut list);
+        // 直接通信と G HUB で別の名前に分かれていた記録を、G HUB 側の名前にまとめる (起動時と対応が増えたとき)
+        if sources::ALIASES_CHANGED.swap(false, Ordering::Relaxed) {
+            let mut merged = false;
+            for (old, new) in sources::load_aliases().into_iter().filter(|(o, n)| !o.eq_ignore_ascii_case(n)) {
+                if let Ok(mut stats) = STATS.lock() {
+                    if let Some(s) = stats.as_mut() {
+                        s.forget(&old);
+                    }
+                }
+                merged |= crate::migrate::run(&old, &new).settings;
+            }
+            if merged {
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_RELOAD, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
         if log::debug_enabled() {
             let summary: Vec<String> = list.iter().map(|b| format!("{} {}%{}{} [{}]", b.label(), b.percentage, if b.charging { " 充電中" } else { "" }, if b.asleep { " スリープ" } else { "" }, b.source.map(|s| s.label()).unwrap_or("?"))).collect();
             log::debug("D006", format!("取得結果: {} ({} ms)", if summary.is_empty() { "なし".into() } else { summary.join(", ") }, started.elapsed().as_millis()));
@@ -527,7 +544,7 @@ fn check_notifications() {
 
     for b in list.iter().filter(|b| b.connected) {
         // 満充電通知
-        if b.charging && (b.fully_charged || b.percentage >= 100) {
+        if b.charging && (b.fully_charged || (b.percentage >= 100 && !b.voltage_estimate)) {
             if a.settings.notify_full_charge && a.full_notified.insert(b.device_name.clone()) {
                 let done = crate::i18n::t().full_charge_done;
                 notify(b.label(), done, 1);

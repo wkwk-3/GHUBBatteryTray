@@ -10,6 +10,7 @@ mod i18n;
 mod icon;
 mod live;
 mod log;
+mod migrate;
 mod placeholders;
 mod settings;
 mod sources;
@@ -116,8 +117,16 @@ mod tests {
         assert!(list.iter().any(|b| b.connected && (0..=100).contains(&b.percentage)));
     }
 
+    /// LOCALAPPDATA を差し替えるテストと、それを読むテストを同時に動かさない
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn settings_db_fallback_reads() {
+        let _env = env_lock();
         assert!(!ghub::read_settings_db().expect("settings.db").is_empty());
     }
 
@@ -133,6 +142,7 @@ mod tests {
 
     #[test]
     fn existing_settings_load() {
+        let _env = env_lock();
         let s = Settings::load();
         assert!(s.tray_display_devices.iter().any(|d| s.rules(d).is_some_and(|r| !r.is_empty())));
     }
@@ -200,6 +210,7 @@ mod tests {
         let _ = std::fs::create_dir_all(path.join("GHUBBatteryTray"));
         std::fs::write(path.join("GHUBBatteryTray").join("settings.json"), serde_json::to_string(&s).unwrap()).unwrap();
         // Settings::load は LOCALAPPDATA を見るので、このテストの間だけ差し替える
+        let _env = env_lock();
         let old = std::env::var("LOCALAPPDATA").unwrap();
         unsafe { std::env::set_var("LOCALAPPDATA", &path) };
         let loaded = Settings::load();
@@ -394,10 +405,10 @@ mod tests {
         assert_eq!(parse_version("2.1"), Some((2, 1, 0)));
         assert_eq!(parse_version("v3.0.0-beta"), Some((3, 0, 0)));
         assert_eq!(parse_version("latest"), None);
-        assert_eq!(crate::updater::CURRENT, "3.2.1");
+        assert_eq!(crate::updater::CURRENT, "3.3.0");
         let r = |tag: &str| Release { tag: tag.into(), ..Default::default() };
-        assert!(r("v3.2.2").is_newer() && r("v3.3.0").is_newer() && r("v10.0.0").is_newer());
-        assert!(!r("v3.2.1").is_newer() && !r("v3.2.0").is_newer() && !r("v3.1.1").is_newer() && !r("nightly").is_newer());
+        assert!(r("v3.3.1").is_newer() && r("v3.4.0").is_newer() && r("v10.0.0").is_newer());
+        assert!(!r("v3.3.0").is_newer() && !r("v3.3").is_newer() && !r("v3.2.1").is_newer() && !r("nightly").is_newer());
     }
 
     #[test]
@@ -627,7 +638,7 @@ SHA256: {}", hash.to_uppercase()),
     fn log_ids_are_unique() {
         // ログの ID (E001 など) は 1 か所でだけ使う
         let sources = [
-            include_str!("envinfo.rs"), include_str!("ghub.rs"), include_str!("health.rs"), include_str!("hidpp.rs"), include_str!("live.rs"), include_str!("history.rs"),
+            include_str!("envinfo.rs"), include_str!("ghub.rs"), include_str!("health.rs"), include_str!("hidpp.rs"), include_str!("live.rs"), include_str!("migrate.rs"), include_str!("history.rs"),
             include_str!("log.rs"), include_str!("main.rs"), include_str!("settings.rs"), include_str!("sources.rs"), include_str!("startup.rs"), include_str!("stats.rs"),
             include_str!("tray.rs"), include_str!("ui.rs"), include_str!("updater.rs"), include_str!("webhook.rs"),
         ];
@@ -809,5 +820,97 @@ SHA256: {}", hash.to_uppercase()),
         // 上がり方がまだ分からないうちは「充電中」だけ
         let early = crate::ghub::Battery { connected: true, charging: true, percentage: 75, ..Default::default() };
         assert_eq!(early.status(), "75% / 充電中");
+    }
+
+    #[test]
+    fn same_device_across_hid_and_ghub() {
+        use crate::ghub::Battery;
+        use crate::sources::same_device;
+        // G703: 名前が違う (直接通信は長い正式名、G HUB は短い表示名と別の内部名)
+        let hid = Battery { device_name: "g703lightspeedwirelessgamingmousewhero".into(), display_name: "G703 LIGHTSPEED Wireless Gaming Mouse w/ HERO".into(), ..Default::default() };
+        let ghub = Battery { device_name: "g703hero".into(), display_name: "G703 LIGHTSPEED".into(), ..Default::default() };
+        assert!(same_device(&hid, &ghub), "名前の先頭一致");
+        // unitId が分かれば、名前に関係なく unitId で判断する (PRO 2 LIGHTSPEED の実機の値)
+        let hid2 = Battery { display_name: "PRO 2 LIGHTSPEED".into(), unit_id: Some("748211122".into()), pids: vec![0x40A8, 0xC09A], ..Default::default() };
+        let ghub2 = Battery { device_name: "pro2wirelessmouse".into(), display_name: "Something else".into(), unit_id: Some("748211122".into()), pids: vec![16552], ..Default::default() };
+        assert!(same_device(&hid2, &ghub2));
+        // 同じ機種でも別の個体 (unitId が違う) はまとめない
+        let other = Battery { unit_id: Some("123".into()), ..ghub2.clone() };
+        assert!(!same_device(&hid2, &other));
+        // unitId が片方にしかなければ製品 ID で判断する
+        let ghub3 = Battery { unit_id: None, ..ghub2.clone() };
+        assert!(same_device(&hid2, &ghub3));
+        // 関係ないデバイス
+        let headset = Battery { device_name: "proxwireless".into(), display_name: "PRO X Wireless".into(), ..Default::default() };
+        assert!(!same_device(&hid, &headset));
+    }
+
+    #[test]
+    fn voltage_estimate_uses_ghub_level_while_charging() {
+        use crate::ghub::Battery;
+        // G703 の実際のログ: 電圧からの推定は充電中に 100%、G HUB は 65%
+        let mut hid = Battery { device_name: "g703lightspeedwirelessgamingmousewhero".into(), percentage: 100, charging: true, connected: true, voltage_estimate: true, ..Default::default() };
+        let ghub = Battery { device_name: "g703hero".into(), display_name: "G703 LIGHTSPEED".into(), percentage: 65, charging: true, connected: true, ..Default::default() };
+        crate::sources::merge(&mut hid, &ghub);
+        assert_eq!((hid.percentage, hid.charging, hid.fully_charged), (65, true, false));
+        assert_eq!(hid.device_name, "g703hero", "設定・統計は G HUB の名前にまとまる");
+        // 残量を % で返すデバイスは直接通信の値のまま
+        let mut unified = Battery { percentage: 40, connected: true, ..Default::default() };
+        crate::sources::merge(&mut unified, &ghub);
+        assert_eq!(unified.percentage, 40);
+    }
+
+    #[test]
+    fn merge_split_records_into_ghub_name() {
+        use crate::migrate::{merge_health, merge_history, merge_settings, merge_stats};
+        use crate::stats::{Hour, load, path_in, save_all};
+        let dir = stats_dir("merge");
+        let old = "g703lightspeedwirelessgamingmousewhero";
+        let new = "g703hero";
+        let h0 = 1_800_000_000u32 / 3600;
+
+        // 統計: 2 時間は両方の名前で記録 (同じ時間の二重記録)、1 時間は古い名前だけ
+        let rec = |hour: u32, use_secs: u16, drain_m: u16| Hour { hour, use_secs, drain_m, ..Default::default() };
+        save_all(&path_in(&dir, old), &[rec(h0, 3600, 5000), rec(h0 + 1, 1800, 2000), rec(h0 + 5, 3600, 4000)]).unwrap();
+        save_all(&path_in(&dir, new), &[rec(h0, 3000, 4800), rec(h0 + 1, 3600, 4100)]).unwrap();
+        assert_eq!(merge_stats(&path_in(&dir, old), &path_in(&dir, new)).unwrap(), 1);
+        let merged = load(&path_in(&dir, new));
+        assert_eq!(merged.iter().map(|h| (h.hour - h0, h.use_secs)).collect::<Vec<_>>(), vec![(0, 3600), (1, 3600), (5, 3600)], "同じ時は観測が長いほう");
+        assert!(!path_in(&dir, old).exists() && path_in(&dir, old).with_extension("bin.merged").exists());
+
+        // 履歴: G HUB 側の記録の近く (15 分以内) の行は重複として捨て、離れた時間の行だけ名前を書き換えて残す
+        let t = 1_800_000_000u64;
+        let history = dir.join("history.csv");
+        std::fs::write(&history, format!(
+            "{t},{new},65,1\n{},{old},100,1\n{},{old},90,0\n{},mouse,50,0\n",
+            t + 60, t + 3 * 3600, t + 100
+        )).unwrap();
+        assert_eq!(merge_history(&history, old, new).unwrap(), 1);
+        let text = std::fs::read_to_string(&history).unwrap();
+        assert!(!text.contains(old));
+        assert!(text.contains(&format!("{},{new},90,0", t + 3 * 3600)) && text.contains("mouse,50,0"));
+
+        // 放電の記録: G HUB 側に終わりが近い記録があれば捨てる
+        let health = dir.join("health.csv");
+        std::fs::write(&health, format!("{t},{new},90,40,10.000,\n{},{old},95,45,10.000,\n{},{old},80,30,8.000,\n", t + 600, t + 86400)).unwrap();
+        assert_eq!(merge_health(&health, old, new).unwrap(), 1);
+        let runs = crate::health::load_all(&health);
+        assert!(!runs.contains_key(old));
+        assert_eq!(runs[new].len(), 2);
+
+        // 設定: 古い名前の通知ルールのうち、G HUB 側に無いものだけ足す。トレイ表示は G HUB 側の名前に
+        let mut s = crate::settings::Settings::default();
+        let rule = |battery: i32, message: &str| crate::settings::Rule { enabled: true, battery, message: message.into(), balloon_tip_icon: 2 };
+        s.device_notifications.insert(new.into(), vec![rule(20, "低い")]);
+        s.device_notifications.insert(old.into(), vec![rule(20, "低い"), rule(5, "もうすぐ切れる")]);
+        s.set_tray(old, true);
+        assert!(merge_settings(&mut s, old, new));
+        assert_eq!(s.device_notifications[new].len(), 2);
+        assert!(!s.device_notifications.contains_key(old));
+        assert!(s.is_tray(new) && !s.is_tray(old));
+        // 2 回目は何もしない
+        assert!(!merge_settings(&mut s, old, new));
+        assert_eq!(merge_history(&history, old, new).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

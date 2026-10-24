@@ -117,6 +117,23 @@ pub fn load(path: &Path) -> Vec<Hour> {
     bytes[HEADER as usize..].chunks_exact(RECORD).map(Hour::decode).collect()
 }
 
+/// 全レコードを書き直す (記録をまとめるときだけ)。一時ファイルに書いてから置き換える
+pub fn save_all(path: &Path, hours: &[Hour]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut bytes = Vec::with_capacity(HEADER as usize + hours.len() * RECORD);
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    bytes.extend_from_slice(&[0, 0]);
+    for h in hours {
+        bytes.extend_from_slice(&h.encode());
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// 1 時間分を書く。同じ時のレコードが最後にあれば上書き、なければ追記
 fn store(path: &Path, h: &Hour) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
@@ -314,6 +331,14 @@ impl Recorder {
         if let Some(acc) = self.open.get(key).filter(|a| !a.is_empty()) {
             write(&path_in(&self.dir, key), &acc.record());
         }
+    }
+
+    /// 別の名前にまとめたデバイスの途中経過を捨てる (古い名前のファイルを作り直さないように)
+    pub fn forget(&mut self, key: &str) {
+        let key = key.to_ascii_lowercase();
+        self.open.remove(&key);
+        self.last.remove(&key);
+        self.flushed_at.remove(&key);
     }
 
     pub fn flush_all(&mut self, t: u64) {
