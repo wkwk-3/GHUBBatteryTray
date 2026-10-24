@@ -1311,7 +1311,10 @@ fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, 
     painter.galley(egui::pos2(left, big.center().y - galley.size().y / 2.0), galley, p.sub);
 
     // 残量バー
-    let bar = egui::Rect::from_min_size(egui::pos2(rect.min.x + pad, rect.max.y - pad - 6.0), Vec2::new(rect.width() - pad * 2.0 - 70.0, 6.0));
+    // 右下の「詳細を表示」の幅だけバーを短くする (言語で長さが違う)
+    let hint = if expanded { t().collapse } else { t().expand };
+    let hint_w = painter.layout_no_wrap(hint.into(), egui::FontId::proportional(12.0), p.sub).size().x;
+    let bar = egui::Rect::from_min_size(egui::pos2(rect.min.x + pad, rect.max.y - pad - 6.0), Vec2::new(rect.width() - pad * 2.0 - hint_w - 12.0, 6.0));
     painter.rect_filled(bar, CornerRadius::same(3), p.track);
     if let Some(b) = battery.filter(|b| b.connected && b.percentage > 0) {
         let fill = egui::Rect::from_min_size(bar.min, Vec2::new((bar.width() * b.percentage.clamp(0, 100) as f32 / 100.0).max(6.0), 6.0));
@@ -1319,7 +1322,6 @@ fn device_card(ui: &mut egui::Ui, p: Palette, colors: &LevelColors, name: &str, 
     }
 
     // 詳細の開閉
-    let hint = if expanded { t().collapse } else { t().expand };
     let hint_color = if selected || response.hovered() { ACCENT } else { p.sub };
     painter.text(egui::pos2(rect.max.x - pad, bar.center().y), egui::Align2::RIGHT_CENTER, hint, egui::FontId::proportional(12.0), hint_color);
 

@@ -293,7 +293,7 @@ mod tests {
     fn status_labels_power_as_discharge() {
         let mut b = battery(55, false, Some(10.0));
         b.power_mw = Some(14.74);
-        assert!(b.status().contains("放電量 14.7 mW"), "{}", b.status());
+        assert!(b.status().contains("消費電力 14.7 mW"), "{}", b.status());
     }
 
     #[test]
